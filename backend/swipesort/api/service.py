@@ -10,6 +10,7 @@ from sqlalchemy.engine import Engine
 from sqlmodel import Session as DB
 from sqlmodel import col, select
 
+from swipesort.api.events import EventBus
 from swipesort.api.schemas import (
     Candidate,
     Card,
@@ -21,6 +22,7 @@ from swipesort.api.schemas import (
     FolderOut,
     Progress,
     SessionOut,
+    StreamEvent,
     TreeNode,
     UndoOut,
 )
@@ -72,6 +74,7 @@ class SessionService:
         self.platform = platform or get_platform()
         self.provider = provider or get_provider(settings)
         self.pipelines: dict[int, SessionPipeline] = {}
+        self.events = EventBus()
         self._executors: dict[int, Executor] = {}
         self._locks: dict[int, threading.Lock] = {}
         self._last_target: dict[int, int] = {}
@@ -169,6 +172,7 @@ class SessionService:
             db.refresh(row)
             out_model = self._session_out(db, row)
         pipe = SessionPipeline(self.engine, self.settings, self.platform, self.provider, sid)
+        pipe.notify = lambda kind, ids, sid=sid: self._on_pipeline(sid, kind, ids)
         self.pipelines[sid] = pipe
         pipe.start()
         return out_model
@@ -176,6 +180,48 @@ class SessionService:
     def get_session(self, sid: int) -> SessionOut:
         with DB(self.engine) as db:
             return self._session_out(db, self._session(db, sid))
+
+    # ---------- events ----------
+    def card_for(self, fid: int) -> Card | None:
+        """The card currently shown for a file (duplicate card first), or None if not showable."""
+        with DB(self.engine) as db:
+            f = db.get(File, fid)
+            if f is None or f.status not in SHOWABLE:
+                return None
+            row = self._session(db, f.session_id)
+            sug = self._dup_suggestion(db, fid)
+            if sug is not None and f.status == FileStatus.ready:
+                card = self._dup_card(f, sug, db, row)
+                if card is not None:
+                    return card
+            cls = db.exec(select(Suggestion).where(Suggestion.file_id == fid,
+                                                   Suggestion.kind == "classify")
+                          .order_by(col(Suggestion.id).desc())).first()
+            return self._card(f, f.session_id, db, Path(row.output_root), cls)
+
+    def publish(self, sid: int, type_: str, *, card: Card | None = None,
+                card_id: str | None = None, message: str = "") -> None:
+        if not self.events.has_subscribers(sid):
+            return
+        with DB(self.engine) as db:
+            progress = self._progress(db, sid)
+        self.events.publish(sid, StreamEvent(type=type_, card=card,
+                                             card_id=card_id, progress=progress,
+                                             message=message))
+
+    def _on_pipeline(self, sid: int, kind: str, ids: list[int]) -> None:
+        if not self.events.has_subscribers(sid):
+            return
+        etype = {"ready": "card_ready", "updated": "card_updated"}.get(kind)
+        if etype is None:
+            self.publish(sid, "progress")
+            return
+        for fid in ids:
+            card = self.card_for(fid)
+            if card is not None:
+                self.publish(sid, etype, card=card)
+        if kind == "ready":
+            self.publish(sid, "progress")
 
     # ---------- folders ----------
     def list_folders(self, sid: int) -> list[FolderOut]:
@@ -224,6 +270,7 @@ class SessionService:
             pipe = self.pipelines.get(sid)
             if pipe is not None:
                 pipe.on_folder_created(f, _rel(made, root))
+            self.publish(sid, "tree_changed")
             assert f.id is not None
             return FolderOut(id=f.id, path=_rel(made, root), name=made.name, depth=f.depth,
                              created_by="user")
@@ -418,6 +465,7 @@ class SessionService:
             assert dec.id is not None
             ex = self._executor(row)
             final: Path | None = None
+            removed_other: int | None = None
             if body.action == "pick":
                 folder = db.get(Folder, body.target_folder_id) if body.target_folder_id else None
                 if folder is None or folder.session_id != sid:
@@ -468,6 +516,7 @@ class SessionService:
                             if of is not None:
                                 of.path, of.status = str(trashed), FileStatus.decided
                                 db.add(of)
+                                removed_other = of.id
                         else:
                             oix = db.get(IndexedFile, int(raw))
                             if oix is not None:
@@ -484,8 +533,13 @@ class SessionService:
                 f.path = str(final)
             db.add(f)
             db.commit()
-            return DecideOut(decision_id=dec.id, final_path=str(final) if final else None,
-                             progress=self._progress(db, sid))
+            out = DecideOut(decision_id=dec.id, final_path=str(final) if final else None,
+                            progress=self._progress(db, sid))
+        if removed_other is not None:
+            self.publish(sid, "card_removed", card_id=f"d{removed_other}")
+            self.publish(sid, "card_removed", card_id=f"m{removed_other}")
+        self.publish(sid, "tree_changed" if final is not None else "progress")
+        return out
 
     def undo(self, sid: int, steps: int = 1) -> UndoOut:
         undone_ops: list[int] = []
@@ -554,7 +608,9 @@ class SessionService:
                 dec.undone = True
                 db.add(dec)
                 db.commit()
-            return UndoOut(undone_ops=undone_ops, progress=self._progress(db, sid))
+            out = UndoOut(undone_ops=undone_ops, progress=self._progress(db, sid))
+        self.publish(sid, "tree_changed")
+        return out
 
     # ---------- trees ----------
     def tree(self, sid: int, side: str) -> TreeNode:

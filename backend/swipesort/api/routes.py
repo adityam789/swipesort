@@ -3,7 +3,7 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request
+from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, PlainTextResponse, Response
 
 from swipesort.api.schemas import (
@@ -16,6 +16,7 @@ from swipesort.api.schemas import (
     FolderOut,
     SessionCreate,
     SessionOut,
+    StreamEvent,
     TreeNode,
     UndoIn,
     UndoOut,
@@ -159,3 +160,23 @@ def browse(path: str = Query("")) -> BrowseOut:
         raise HTTPException(403, str(e)) from e
     parent = str(p.parent) if p.parent != p else None
     return BrowseOut(path=str(p), parent=parent, entries=entries)
+
+
+@router.websocket("/sessions/{sid}/stream")
+async def stream(ws: WebSocket, sid: int) -> None:
+    service: SessionService = ws.app.state.service
+    try:
+        progress = service.get_session(sid).progress
+    except NotFound:
+        await ws.close(code=4404)
+        return
+    await ws.accept()
+    q = service.events.subscribe(sid)
+    try:
+        await ws.send_text(StreamEvent(type="hello", progress=progress).model_dump_json())
+        while True:
+            await ws.send_text(await q.get())
+    except WebSocketDisconnect:
+        pass
+    finally:
+        service.events.unsubscribe(sid, q)

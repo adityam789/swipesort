@@ -11,6 +11,7 @@ import hashlib
 import json
 import logging
 import threading
+from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
 from pathlib import Path
 
@@ -78,12 +79,39 @@ class SessionPipeline:
         self._index: list[scoring.FolderIndex] = []
         self._placed: dict[str, scoring.PlacedVec] = {}  # key: indexed path
         self._vecs: dict[int, Vec] = {}  # input file id -> vec
+        # invalidation (SPEC §7): suggestions carry the versions they were computed at
+        self.tree_version = 0  # bumped on folder mkdir/rename/remove
+        self.index_version = 0  # bumped every `index_bump_every` moves into one folder
+        self._moves_into: dict[int, int] = {}
+        self.notify: Callable[[str, list[int]], None] | None = None  # set by the service
+        self._stop = threading.Event()
+        self._rescore_wanted = threading.Event()
         self._thread = threading.Thread(target=self._run, name=f"pipeline-{session_id}",
                                         daemon=True)
+        self._rescorer = threading.Thread(target=self._rescore_loop,
+                                          name=f"rescore-{session_id}", daemon=True)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
         self._thread.start()
+        self._rescorer.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        self._rescore_wanted.set()
+
+    def _emit(self, kind: str, file_ids: list[int]) -> None:
+        if self.notify is not None and (file_ids or kind == "progress"):
+            try:
+                self.notify(kind, file_ids)
+            except Exception:
+                log.exception("notify failed")
+
+    def _degrade(self, e: Exception) -> None:
+        log.warning("model provider unavailable, falling back to manual cards: %s", e)
+        self.degraded = True
+        self.error = str(e)
+        self._mark_all_ready_manual()
 
     def wait(self, timeout: float | None = None) -> bool:
         return self.done.wait(timeout)
@@ -226,19 +254,20 @@ class SessionPipeline:
             # 3b. duplicates (SPEC §5) -> duplicate suggestions; shown before classification
             self._dedup(db, order, indexed, hashes)
 
-            # 4. embed digests + folder profiles
-            items = [(hashes[k], d) for k, d in digests.items()]
+            # 4. embed what scoring needs first: folder profiles + the output tree's files
+            prof_items: list[tuple[str, str]] = []
             for fo in folders:
                 assert fo.id is not None
                 ptxt = profile_text(_rel(Path(fo.path), out), fo.description)
-                items.append(("folder-profile:" + hashlib.sha1(ptxt.encode()).hexdigest(), ptxt))
+                prof_items.append(("folder-profile:" + hashlib.sha1(ptxt.encode()).hexdigest(),
+                                   ptxt))
+            ix_items = [(hashes[f"ix:{ix.id}"], digests[f"ix:{ix.id}"]) for ix in indexed
+                        if f"ix:{ix.id}" in digests]
             try:
-                vecs = embed_cached(db, self.provider, items, self.settings.pipeline.embed_batch)
+                vecs = embed_cached(db, self.provider, prof_items + ix_items,
+                                    self.settings.pipeline.embed_batch)
             except ModelUnavailable as e:
-                log.warning("model provider unavailable, falling back to manual cards: %s", e)
-                self.degraded = True
-                self.error = str(e)
-                self._mark_all_ready_manual()
+                self._degrade(e)
                 return
 
             # 5. folder index
@@ -261,21 +290,55 @@ class SessionPipeline:
                 self._placed[ix.path] = scoring.PlacedVec(folder_id=ix.folder_id, vec=vecs[ih2])
             self._rebuild_index()
 
-            # 6. score inputs in card order -> READY
-            for f in order:
-                assert f.id is not None
-                fh2 = hashes.get(f"f:{f.id}")
-                vec = vecs.get(fh2) if fh2 else None
-                if vec is not None:
-                    self._vecs[f.id] = vec
-                fresh = db.get(File, f.id)
-                if fresh is None or fresh.status != FileStatus.queued:
-                    continue
-                if vec is not None:
-                    db.add(self._suggest(fresh, vec))
-                fresh.status = FileStatus.ready
-                db.add(fresh)
+            # 6. lookahead scheduler (SPEC §7): embed + score inputs in priority order, in
+            #    small batches, so the first READY cards appear within seconds. Priority =
+            #    distance from the user's cursor in card order: duplicates first, then card
+            #    order. Remaining work continues at idle priority until everything is READY.
+            dup_ids = {sg.file_id for sg in db.exec(select(Suggestion).where(
+                Suggestion.session_id == self.sid, Suggestion.kind == "duplicate")).all()}
+            rank = {f.id: i for i, f in enumerate(order)}
+            pending = sorted((f for f in order if f.id is not None),
+                             key=lambda f: (0 if f.id in dup_ids else 1, rank[f.id]))
+            batch = max(1, self.settings.pipeline.embed_batch)
+            small = max(1, min(batch, self.settings.pipeline.urgent_batch))
+            target = self.settings.pipeline.lookahead + batch
+            i = 0
+            while i < len(pending):
+                if self._stop.is_set():
+                    return
+                # Lookahead-aware batch size: while the READY buffer ahead of the user is
+                # thin, embed small batches (low latency); once it's comfortably above the
+                # lookahead window, switch to full batches (throughput).
+                buffered = len(db.exec(select(File.id).where(
+                    File.session_id == self.sid,
+                    col(File.status).in_((FileStatus.ready, FileStatus.skipped)))).all())
+                size = small if buffered < target else batch
+                chunk = pending[i:i + size]
+                i += size
+                emb_todo = [(hashes[f"f:{f.id}"], digests[f"f:{f.id}"]) for f in chunk
+                            if f"f:{f.id}" in digests]
+                try:
+                    cvecs = embed_cached(db, self.provider, emb_todo, batch)
+                except ModelUnavailable as e:
+                    self._degrade(e)
+                    return
+                ready: list[int] = []
+                for f in chunk:
+                    assert f.id is not None
+                    fh2 = hashes.get(f"f:{f.id}")
+                    vec = cvecs.get(fh2) if fh2 else None
+                    if vec is not None:
+                        self._vecs[f.id] = vec
+                    fresh = db.get(File, f.id)
+                    if fresh is None or fresh.status != FileStatus.queued:
+                        continue
+                    if vec is not None:
+                        db.add(self._suggest(fresh, vec))
+                    fresh.status = FileStatus.ready
+                    db.add(fresh)
+                    ready.append(f.id)
                 db.commit()
+                self._emit("ready", ready)
 
     # ------------------------------------------------------------------ dedup
     def _dedup(self, db: DB, order: list[File], indexed: list[IndexedFile],
@@ -334,7 +397,55 @@ class SessionPipeline:
             candidates_json=json.dumps([{"folder_id": s.folder_id, "path": s.path, "p": s.p,
                                          "signals": s.signals} for s in top]),
             reason=_reason(top), model_version=self.provider.embed_model_id(),
+            tree_version=self.tree_version, index_version=self.index_version,
         )
+
+    # ------------------------------------------------------------------ invalidation
+    def request_rescore(self) -> None:
+        self._rescore_wanted.set()
+
+    def _rescore_loop(self) -> None:
+        while not self._stop.is_set():
+            self._rescore_wanted.wait()
+            if self._stop.is_set():
+                return
+            self._rescore_wanted.clear()
+            try:
+                self.rescore_stale()
+            except Exception:
+                log.exception("rescore failed")
+
+    def rescore_stale(self) -> list[int]:
+        """Cheap rescore (vector math only) of READY suggestions computed at older versions.
+        Updates in place when the top-3 or tier changed; emits card_updated for those."""
+        changed: list[int] = []
+        tv, iv = self.tree_version, self.index_version
+        with DB(self.engine) as db:
+            files = db.exec(select(File).where(
+                File.session_id == self.sid,
+                col(File.status).in_((FileStatus.ready, FileStatus.skipped)))).all()
+            for f in files:
+                assert f.id is not None
+                vec = self._vecs.get(f.id)
+                if vec is None:
+                    continue
+                old = db.exec(select(Suggestion).where(
+                    Suggestion.file_id == f.id, Suggestion.kind == "classify")
+                    .order_by(col(Suggestion.id).desc())).first()
+                if old is None or (old.tree_version == tv and old.index_version == iv):
+                    continue
+                new = self._suggest(f, vec)
+                top_old = [c["folder_id"] for c in json.loads(old.candidates_json)[:3]]
+                top_new = [c["folder_id"] for c in json.loads(new.candidates_json)[:3]]
+                if top_old != top_new or old.tier != new.tier:
+                    changed.append(f.id)
+                old.candidates_json, old.confidence = new.candidates_json, new.confidence
+                old.tier, old.reason = new.tier, new.reason
+                old.tree_version, old.index_version = new.tree_version, new.index_version
+                db.add(old)
+            db.commit()
+        self._emit("updated", changed)
+        return changed
 
     def on_placed(self, file_id: int, folder_id: int, new_path: str) -> None:
         """A decision moved an input file into an output folder: learn from it (kNN + centroid)."""
@@ -346,6 +457,13 @@ class SessionPipeline:
             self._direct_vecs.setdefault(folder_id, []).append(vec)
             self._direct_names.setdefault(folder_id, []).append(Path(new_path).name)
             self._rebuild_index()
+            n = self._moves_into.get(folder_id, 0) + 1
+            self._moves_into[folder_id] = n
+            bump = n % max(1, self.settings.pipeline.index_bump_every) == 0
+            if bump:
+                self.index_version += 1
+        if bump:
+            self.request_rescore()
 
     def on_unplaced(self, file_id: int, folder_id: int, old_path: str) -> None:
         vec = self._vecs.get(file_id)
@@ -378,20 +496,28 @@ class SessionPipeline:
             self._specs.append(scoring.FolderSpec(folder_id=folder.id, path=rel,
                                                   parent_id=folder.parent_id))
             self._rebuild_index()
+            self.tree_version += 1
+        self.request_rescore()
 
     def on_folder_removed(self, folder_id: int) -> None:
         with self._lock:
             self._specs = [s for s in self._specs if s.folder_id != folder_id]
             self._profiles.pop(folder_id, None)
             self._rebuild_index()
+            self.tree_version += 1
+        self.request_rescore()
 
     def _mark_all_ready_manual(self) -> None:
+        ids: list[int] = []
         with DB(self.engine) as db:
             for f in db.exec(select(File).where(File.session_id == self.sid,
                                                 col(File.status) == FileStatus.queued)).all():
                 f.status = FileStatus.ready
                 db.add(f)
+                if f.id is not None:
+                    ids.append(f.id)
             db.commit()
+        self._emit("ready", ids)
 
 
 def _card_order(f: File) -> tuple[str, str]:

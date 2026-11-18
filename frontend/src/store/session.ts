@@ -1,10 +1,12 @@
 import { create } from 'zustand'
 import { api } from '../api/client'
-import type { Card, DecideIn, Edge, FolderOut, Progress, SessionOut } from '../api/types'
+import type { Card, DecideIn, Edge, FolderOut, Progress, SessionOut, StreamEvent } from '../api/types'
+import { openStream } from './ws'
 
 export const PREFETCH_LIMIT = 20
 export const REFILL_BELOW = 5
 export const UNDO_ALL_STEPS = 1_000_000
+export const TREE_DEBOUNCE_MS = 300
 
 export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox' | 'kept'
 
@@ -62,6 +64,13 @@ export interface SessionState {
   /** Bumped after each decision/undo so trees & folder lists refetch. */
   treeVersion: number
   shownAt: number
+  /** True while the WebSocket stream is open (polling is only a fallback while it is not). */
+  socketOpen: boolean
+  /**
+   * card_updated payloads for a card that was on screen (or already decided), keyed by file id.
+   * Applied only if that card comes back (undo); never swapped under the user's finger.
+   */
+  stashedUpdates: Record<number, Card>
 
   start: (session: SessionOut) => Promise<void>
   reset: () => void
@@ -77,6 +86,8 @@ export interface SessionState {
   undo: () => Promise<void>
   undoAll: () => Promise<void>
   setProgress: (p: Progress) => void
+  /** Apply one server-pushed stream event. */
+  applyEvent: (ev: StreamEvent) => void
   dismissToast: () => void
   openPicker: () => void
   closePicker: () => void
@@ -93,6 +104,16 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   const next = chain.then(fn, fn)
   chain = next.catch(() => undefined)
   return next
+}
+
+let closeStream: (() => void) | null = null
+let treeTimer: ReturnType<typeof setTimeout> | null = null
+
+function stopStream() {
+  closeStream?.()
+  closeStream = null
+  if (treeTimer !== null) clearTimeout(treeTimer)
+  treeTimer = null
 }
 
 const EMPTY_COUNTS = (): Record<Outcome, number> => ({ moved: 0, trashed: 0, deferred: 0, inbox: 0, kept: 0 })
@@ -117,6 +138,8 @@ const initial = () => ({
   previewOpen: false,
   treeVersion: 0,
   shownAt: Date.now(),
+  socketOpen: false,
+  stashedUpdates: {} as Record<number, Card>,
 })
 
 export const useSession = create<SessionState>()((set, get) => ({
@@ -124,11 +147,64 @@ export const useSession = create<SessionState>()((set, get) => ({
 
   start: async (session) => {
     chain = Promise.resolve()
+    stopStream()
     set({ ...initial(), sessionId: session.id, session, progress: session.progress })
+    closeStream = openStream(session.id, {
+      onEvent: (ev) => {
+        if (get().sessionId === session.id) get().applyEvent(ev)
+      },
+      onOpen: (reconnect) => {
+        if (get().sessionId !== session.id) return
+        set({ socketOpen: true })
+        // Events may have been missed while disconnected: catch up from the REST endpoint.
+        if (reconnect) void get().refresh()
+      },
+      onClose: () => {
+        if (get().sessionId === session.id) set({ socketOpen: false })
+      },
+    })
     await get().fetchMore()
   },
 
-  reset: () => set(initial()),
+  reset: () => {
+    stopStream()
+    set(initial())
+  },
+
+  applyEvent: (ev) => {
+    switch (ev.type) {
+      case 'hello':
+      case 'progress':
+        if (ev.progress) set({ progress: ev.progress })
+        break
+      case 'card_ready':
+        if (ev.progress) set({ progress: ev.progress })
+        if (ev.card) set((s) => cardReady(s, ev.card as Card))
+        break
+      case 'card_updated':
+        if (ev.progress) set({ progress: ev.progress })
+        if (ev.card) set((s) => cardUpdated(s, ev.card as Card))
+        break
+      case 'card_removed':
+        if (ev.progress) set({ progress: ev.progress })
+        if (ev.card_id) {
+          const id = ev.card_id
+          // The visible card (head) is left alone; deciding it later gets a 400, handled silently.
+          set((s) => (s.queue.some((c, i) => i > 0 && c.id === id) ? { queue: s.queue.filter((c, i) => i === 0 || c.id !== id) } : {}))
+        }
+        break
+      case 'tree_changed':
+        if (treeTimer !== null) clearTimeout(treeTimer)
+        treeTimer = setTimeout(() => {
+          treeTimer = null
+          set((s) => ({ treeVersion: s.treeVersion + 1 }))
+        }, TREE_DEBOUNCE_MS)
+        break
+      case 'op_failed':
+        set({ toast: { id: ++toastSeq, kind: 'error', message: ev.message || 'An operation failed', undoable: false } })
+        break
+    }
+  },
 
   fetchMore: async () => {
     const { sessionId, fetching } = get()
@@ -199,6 +275,7 @@ export const useSession = create<SessionState>()((set, get) => ({
     const outcome = outcomeOf(edge.action)
     const dupDelta = resolvesDuplicate(card, edge.action) ? 1 : 0
     const entry: UndoEntry = { key: ++keySeq, card, outcome, dupResolved: dupDelta, label: edge.label }
+    const toastId = ++toastSeq
     const body: DecideIn = {
       action: edge.action,
       target_folder_id: edge.target_folder_id ?? null,
@@ -212,13 +289,13 @@ export const useSession = create<SessionState>()((set, get) => ({
       duplicatesResolved: s.duplicatesResolved + dupDelta,
       inFlightIds: new Set(s.inFlightIds).add(card.id),
       flippedIds: without(s.flippedIds, card.id),
-      deferredIds: outcome === 'deferred' ? new Set(s.deferredIds).add(card.id) : s.deferredIds,
+      deferredIds: deferWithStash(s, card, outcome),
       exhausted: false,
       previewOpen: false,
       detailsOpen: false,
       shownAt: Date.now(),
       toast: {
-        id: ++toastSeq,
+        id: toastId,
         kind: 'info',
         message: `${truncate(card.file.name)} → ${edge.label}`,
         undoable: true,
@@ -233,7 +310,25 @@ export const useSession = create<SessionState>()((set, get) => ({
           treeVersion: s.treeVersion + 1,
           inFlightIds: without(s.inFlightIds, card.id),
         })),
-      (err) =>
+      (err) => {
+        if (isBadRequest(err)) {
+          // 400 "not ready or already decided": the card was removed server-side while on screen.
+          // Already advanced past it; quietly forget the decision (no restore, no error toast).
+          set((s) => {
+            const deferredIds = new Set(s.deferredIds)
+            deferredIds.delete(card.id)
+            return {
+              undoStack: s.undoStack.filter((u) => u.key !== entry.key),
+              counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - 1) },
+              duplicatesResolved: Math.max(0, s.duplicatesResolved - dupDelta),
+              inFlightIds: without(s.inFlightIds, card.id),
+              deferredIds,
+              toast: s.toast?.id === toastId ? null : s.toast,
+            }
+          })
+          if (get().queue.length < REFILL_BELOW) void get().fetchMore()
+          return
+        }
         // Roll back: restore the card at the front and drop its undo entry.
         set((s) => {
           const deferredIds = new Set(s.deferredIds)
@@ -253,7 +348,8 @@ export const useSession = create<SessionState>()((set, get) => ({
               undoable: false,
             },
           }
-        }),
+        })
+      },
     )
   },
 
@@ -272,12 +368,17 @@ export const useSession = create<SessionState>()((set, get) => ({
     const { sessionId, undoStack } = get()
     const entry = undoStack[undoStack.length - 1]
     if (sessionId === null || !entry) return
-    // Optimistic: bring the card back right away.
+    // Optimistic: bring the card back right away (with any update that arrived while it was away).
     set((s) => {
       const deferredIds = new Set(s.deferredIds)
       deferredIds.delete(entry.card.id)
+      const stashed = s.stashedUpdates[entry.card.file.id]
+      const back = stashed ?? entry.card
+      deferredIds.delete(back.id)
+      const { [entry.card.file.id]: _used, ...stashedUpdates } = s.stashedUpdates
       return {
-        queue: [entry.card, ...s.queue.filter((c) => c.id !== entry.card.id)],
+        stashedUpdates,
+        queue: [back, ...s.queue.filter((c) => c.id !== entry.card.id && c.id !== back.id)],
         undoStack: s.undoStack.filter((u) => u.key !== entry.key),
         counts: { ...s.counts, [entry.outcome]: Math.max(0, s.counts[entry.outcome] - 1) },
         duplicatesResolved: Math.max(0, s.duplicatesResolved - entry.dupResolved),
@@ -298,7 +399,7 @@ export const useSession = create<SessionState>()((set, get) => ({
     } catch (err) {
       // Put things back the way they were.
       set((s) => ({
-        queue: s.queue.filter((c) => c.id !== entry.card.id),
+        queue: s.queue.filter((c) => c.id !== entry.card.id && c.file.id !== entry.card.file.id),
         undoStack: [...s.undoStack, entry],
         counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + 1 },
         duplicatesResolved: s.duplicatesResolved + entry.dupResolved,
@@ -338,6 +439,54 @@ export const useSession = create<SessionState>()((set, get) => ({
   openDetails: () => set((s) => (s.queue[0]?.duplicate ? { detailsOpen: true } : {})),
   closeDetails: () => set({ detailsOpen: false }),
 }))
+
+function isBadRequest(e: unknown): boolean {
+  return typeof e === 'object' && e !== null && (e as { status?: unknown }).status === 400
+}
+
+/** Deferred cards are not re-shown this pass; also cover a pending id change for the same file. */
+function deferWithStash(s: SessionState, card: Card, outcome: Outcome): Set<string> {
+  if (outcome !== 'deferred') return s.deferredIds
+  const ids = new Set(s.deferredIds).add(card.id)
+  const stashed = s.stashedUpdates[card.file.id]
+  if (stashed) ids.add(stashed.id)
+  return ids
+}
+
+type QueueState = Pick<SessionState, 'queue' | 'deferredIds' | 'inFlightIds' | 'shownAt' | 'stashedUpdates' | 'undoStack'>
+
+/** card_ready: append in server order (duplicates stay ahead of everything else), never at the head. */
+function cardReady(s: QueueState, card: Card): Partial<SessionState> {
+  if (s.deferredIds.has(card.id) || s.inFlightIds.has(card.id)) return {}
+  if (s.queue.some((c) => c.id === card.id || c.file.id === card.file.id)) return cardUpdated(s, card)
+  if (s.queue.length >= PREFETCH_LIMIT) return {} // fetchMore picks it up (in server order) when the queue drains
+  if (s.queue.length === 0) return { queue: [card], shownAt: Date.now() }
+  let at = s.queue.length
+  if (card.kind === 'duplicate') {
+    // After the last duplicate behind the visible card, before every non-duplicate.
+    at = 1
+    s.queue.forEach((c, i) => {
+      if (i > 0 && c.kind === 'duplicate') at = i + 1
+    })
+  }
+  return { queue: [...s.queue.slice(0, at), card, ...s.queue.slice(at)] }
+}
+
+/** card_updated: replace by id, or by file id when the card id changed (d12 -> m12). Never the head. */
+function cardUpdated(s: QueueState, card: Card): Partial<SessionState> {
+  const idx = s.queue.findIndex((c) => c.id === card.id || c.file.id === card.file.id)
+  if (idx > 0) {
+    const queue = s.queue.slice()
+    queue[idx] = card
+    return { queue }
+  }
+  const decided = s.undoStack.some((u) => u.card.file.id === card.file.id)
+  if (idx === 0 || decided) {
+    // On screen (or decided and possibly coming back via undo): hold the update.
+    return { stashedUpdates: { ...s.stashedUpdates, [card.file.id]: card } }
+  }
+  return {}
+}
 
 /** Hotkeys 1/2/3 for a pick layout, used when the backend sent no explicit `keys`. */
 function numberKeys(edges: Card['edges']): Record<string, Edge> {

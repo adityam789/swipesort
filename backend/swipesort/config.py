@@ -25,6 +25,8 @@ class Pipeline(BaseModel):
     max_text_chars: int = 4000
     pages: int = 2
     extract_workers: int = 0  # 0 = os.cpu_count()
+    urgent_batch: int = 8  # embed batch size while the READY buffer is below lookahead+batch
+    index_bump_every: int = 25  # moves into one folder before index_version bumps
 
 
 class Dedup(BaseModel):

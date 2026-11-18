@@ -51,10 +51,12 @@ def test_empty_folder_relies_on_profile() -> None:
     ]
     out = score(e(3), [], "", fs, [], Scoring())
     assert out[0].folder_id == 2
-    assert out[0].signals["centroid"] == 0.0 and out[0].signals["profile"] > 0.99
+    # missing evidence is neutral: the profile similarity stands in for the centroid
+    assert out[0].signals["profile"] > 0.99
+    assert out[0].signals["centroid"] == out[0].signals["profile"]
     # profile weight is the empty weight when n_files == 0
     cfg = Scoring()
-    assert abs(out[0].raw - cfg.w_profile_empty * 1.0) < 1e-6
+    assert abs(out[0].raw - (cfg.w_centroid + cfg.w_profile_empty) * 1.0) < 1e-6
 
 
 def test_knn_vote() -> None:

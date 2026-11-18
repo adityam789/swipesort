@@ -220,4 +220,32 @@ describe('Sort page', () => {
       expect(useSession.getState().queue.map((c) => c.id)).toEqual(['d1', 'm2'])
     })
   })
+
+  describe('stream vs polling', () => {
+    it('polls only while the socket is not open and shows the analyzing indicator', async () => {
+      vi.useFakeTimers({ shouldAdvanceTime: true })
+      try {
+        getCards.mockResolvedValue([mk(1), mk(2)])
+        getSession.mockResolvedValue(sess(prog({ scanned: 5, processed: 2 })))
+        await useSession.getState().start(sess(prog({ scanned: 5, processed: 2 })))
+        useSession.setState({ socketOpen: false, queue: [] })
+        renderSort()
+        getSession.mockClear()
+        await act(() => vi.advanceTimersByTimeAsync(1100))
+        expect(getSession).toHaveBeenCalled() // polling while the socket is down
+
+        act(() => useSession.setState({ socketOpen: true }))
+        getSession.mockClear()
+        await act(() => vi.advanceTimersByTimeAsync(10_000))
+        expect(getSession).not.toHaveBeenCalled() // stopped while open
+
+        act(() => useSession.setState({ socketOpen: false }))
+        await act(() => vi.advanceTimersByTimeAsync(3100))
+        expect(getSession).toHaveBeenCalled() // resumed after a drop
+        expect(screen.getByTestId('analyzing')).toHaveTextContent('analyzing 2/5')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+  })
 })

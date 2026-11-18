@@ -157,4 +157,22 @@ export interface BrowseOut {
   entries: BrowseEntry[]
 }
 
+export type StreamEventType =
+  | 'card_ready'
+  | 'card_updated'
+  | 'card_removed'
+  | 'tree_changed'
+  | 'progress'
+  | 'op_failed'
+  | 'hello'
+
+/** One JSON message on WS /api/sessions/{id}/stream. */
+export interface StreamEvent {
+  type: StreamEventType
+  card?: Card | null // card_ready / card_updated
+  card_id?: string | null // card_removed
+  progress?: Progress | null // progress (also piggybacked on others)
+  message?: string // op_failed
+}
+
 export const DIRECTIONS: Direction[] = ['up', 'right', 'down', 'left']

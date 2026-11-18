@@ -30,6 +30,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
   const treeVersion = useSession((s) => s.treeVersion)
   const flippedIds = useSession((s) => s.flippedIds)
   const detailsOpen = useSession((s) => s.detailsOpen)
+  const socketOpen = useSession((s) => s.socketOpen)
   const { decide, flip, undo, pickFolder, openPicker, closePicker, togglePreview, refresh, openDetails, closeDetails } = useSession.getState()
   const [drawer, setDrawer] = useState<Drawer>(null)
 
@@ -38,12 +39,14 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
   const analyzing = !card && progress.processed < progress.scanned
 
   // Poll session progress + cards: every ~1s while analyzing, relaxed otherwise (new cards stream in).
+  // Fallback only: while the WebSocket is open the server pushes everything.
   useEffect(() => {
+    if (socketOpen) return
     const t = setInterval(() => {
       if (analyzing || useSession.getState().queue.length < 5) void refresh()
     }, analyzing ? 1000 : 3000)
     return () => clearInterval(t)
-  }, [analyzing, refresh])
+  }, [analyzing, refresh, socketOpen])
 
   // Warm previews for the next two cards so they render instantly after a fling.
   const next1 = queue[1]?.file.id
@@ -126,6 +129,11 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
             {progress.decided} done · {progress.remaining} left · <span data-testid="ready-ahead" title="Cards precomputed and ready">
               {queue.length} ready ahead
             </span>
+            {progress.processed < progress.scanned && (
+              <span data-testid="analyzing" className="ml-1 text-amber-600 dark:text-amber-400">
+                {' '}· analyzing {progress.processed}/{progress.scanned}
+              </span>
+            )}
           </p>
         </div>
         <button

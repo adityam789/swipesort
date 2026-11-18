@@ -161,20 +161,21 @@ def _softmax(raw: npt.NDArray[np.float64], temperature: float) -> npt.NDArray[np
 
 
 def _knn_shares(file_vec: Vec, placed: list[PlacedVec], k: int) -> dict[int, float]:
-    """Similarity-weighted vote share per folder among the k nearest placed vectors."""
+    """Similarity-weighted vote per folder among the k nearest placed vectors.
+
+    Each of the k slots contributes its (clipped) cosine to its folder, divided by the number of
+    slots. Unlike a pure vote *share*, weak neighbours give a weak signal: with two unrelated
+    placed files a folder no longer gets 0.5 just for existing."""
     if not placed or k <= 0:
         return {}
     sims = np.array([_cos(file_vec, p.vec) for p in placed], dtype=np.float64)
     order = np.argsort(-sims, kind="stable")[:k]
     weights: dict[int, float] = {}
-    total = 0.0
     for i in order:
         w = max(float(sims[i]), 0.0)
         weights[placed[int(i)].folder_id] = weights.get(placed[int(i)].folder_id, 0.0) + w
-        total += w
-    if total <= 0:
-        return {}
-    return {fid: w / total for fid, w in weights.items()}
+    slots = float(len(order))
+    return {fid: w / slots for fid, w in weights.items()}
 
 
 def _token_scores(
@@ -232,12 +233,20 @@ def score(
     knn = _knn_shares(vec, placed, cfg.knn_k)
     tok = _token_scores(file_name_tokens, folders, cfg.bm25_k1, cfg.bm25_b)
     rows: list[tuple[FolderIndex, float, dict[str, float]]] = []
+    # Missing evidence is neutral, not negative: an empty folder (cold start, or one the user
+    # just created) has no centroid and no file types, so it borrows its profile similarity as
+    # the centroid stand-in and the average extension prior of the folders that do have files.
+    shares = [_ext_share(ext, f) for f in folders if f.n_files > 0]
+    neutral_ext = sum(shares) / len(shares) if shares else 0.0
     for f, t in zip(folders, tok, strict=True):
+        prof = _cos(vec, f.profile)
+        cen = f.centroid if f.n_files > 0 else None
+        ext_s = neutral_ext if f.n_files == 0 else _ext_share(ext, f)
         sig = {
-            "centroid": _cos(vec, f.centroid) if f.centroid is not None else 0.0,
-            "profile": _cos(vec, f.profile),
+            "centroid": prof if cen is None else _cos(vec, cen),
+            "profile": prof,
             "knn": knn.get(f.folder_id, 0.0),
-            "meta": cfg.meta_ext_share * _ext_share(ext, f) + (1.0 - cfg.meta_ext_share) * t,
+            "meta": cfg.meta_ext_share * ext_s + (1.0 - cfg.meta_ext_share) * t,
         }
         w_profile = cfg.w_profile_empty if f.n_files == 0 else cfg.w_profile
         raw = (

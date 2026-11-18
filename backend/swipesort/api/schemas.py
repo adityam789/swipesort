@@ -141,3 +141,14 @@ class BrowseOut(BaseModel):
     path: str
     parent: str | None
     entries: list[BrowseEntry]
+
+
+class StreamEvent(BaseModel):
+    """WS /api/sessions/{id}/stream (SPEC §7, §12). One JSON object per message."""
+
+    type: Literal["card_ready", "card_updated", "card_removed", "tree_changed", "progress",
+                  "op_failed", "hello"]
+    card: Card | None = None  # card_ready / card_updated
+    card_id: str | None = None  # card_removed
+    progress: Progress | None = None  # progress (also piggybacked on others)
+    message: str = ""  # op_failed
