@@ -25,7 +25,7 @@ def test_m1_accuracy_and_latency(tmp_path: Path) -> None:
     assert r.n == 300
     assert r.top1 >= 0.80, r.misses[:10]
     assert r.top3 >= 0.95, r.misses[:10]
-    assert r.decide_next_ms_p95 < 100
+    assert r.next_cards_ms_p95 < 100
 
 
 def _client(tmp_path: Path, provider: Any = None) -> tuple[TestClient, Any]:

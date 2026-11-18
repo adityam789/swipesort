@@ -242,12 +242,11 @@ class SessionService:
                 edges["right"] = Edge(label=f"Move to {rel}", action="pick", target_folder_id=last)
         return edges
 
-    def _card(self, f: File, sid: int, db: DB, root: Path) -> Card:
+    def _card(self, f: File, sid: int, db: DB, root: Path,
+              sug: Suggestion | None = None) -> Card:
         assert f.id is not None
         info = FileInfo(id=f.id, name=Path(f.path).name, rel_path=f.rel_path, size=f.size,
                         mtime=f.mtime, ext=f.ext, is_bundle=f.is_bundle)
-        sug = db.exec(select(Suggestion).where(Suggestion.file_id == f.id)
-                      .order_by(col(Suggestion.id).desc())).first()
         if sug is None:
             return Card(id=f"m{f.id}", kind="manual", file=info, reason="Pick a destination",
                         edges=self._manual_edges(sid, db, root))
@@ -303,7 +302,13 @@ class SessionService:
                         p.name.casefold())
 
             ordered = sorted(files, key=key)[:limit]
-            return [self._card(f, sid, db, Path(row.output_root)) for f in ordered]
+            latest: dict[int, Suggestion] = {}
+            ids = [f.id for f in ordered]
+            for sug in db.exec(select(Suggestion).where(col(Suggestion.file_id).in_(ids))
+                               .order_by(col(Suggestion.id))).all():
+                latest[sug.file_id] = sug  # ascending id -> last write wins = newest
+            root = Path(row.output_root)
+            return [self._card(f, sid, db, root, latest.get(f.id or -1)) for f in ordered]
 
     def _inbox_folder(self, db: DB, sid: int, root: Path) -> Folder:
         path = root / INBOX_NAME

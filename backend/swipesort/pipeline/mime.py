@@ -14,17 +14,87 @@ DOCX = "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
 PPTX = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 XLSX = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
+# Built-in extension table, consulted before `mimetypes`: the stdlib reads the Windows registry,
+# so its answers differ across machines. This keeps sniffing identical on macOS and Windows.
+EXT_MIME: dict[str, str] = {
+    "pdf": PDF,
+    "docx": DOCX,
+    "pptx": PPTX,
+    "xlsx": XLSX,
+    "doc": "application/msword",
+    "ppt": "application/vnd.ms-powerpoint",
+    "xls": "application/vnd.ms-excel",
+    "rtf": "application/rtf",
+    "odt": "application/vnd.oasis.opendocument.text",
+    "jpg": "image/jpeg",
+    "jpeg": "image/jpeg",
+    "png": "image/png",
+    "gif": "image/gif",
+    "webp": "image/webp",
+    "heic": "image/heic",
+    "heif": "image/heif",
+    "tif": "image/tiff",
+    "tiff": "image/tiff",
+    "bmp": "image/bmp",
+    "svg": "image/svg+xml",
+    "mp3": "audio/mpeg",
+    "m4a": "audio/mp4",
+    "wav": "audio/wav",
+    "flac": "audio/flac",
+    "mp4": "video/mp4",
+    "mov": "video/quicktime",
+    "mkv": "video/x-matroska",
+    "zip": "application/zip",
+    "txt": "text/plain",
+    "md": "text/markdown",
+    "csv": "text/csv",
+    "json": "application/json",
+    "html": "text/html",
+    "htm": "text/html",
+}
+
 # extension (lowercase, no dot) -> language name. Sniffed text files with these extensions get
 # the mime "text/x-<language>" so the code extractor can claim them.
 CODE_LANGS: dict[str, str] = {
-    "py": "python", "pyi": "python", "js": "javascript", "mjs": "javascript",
-    "cjs": "javascript", "jsx": "javascript", "ts": "typescript", "tsx": "typescript",
-    "java": "java", "kt": "kotlin", "swift": "swift", "c": "c", "h": "c", "cc": "cpp",
-    "cpp": "cpp", "hpp": "cpp", "cs": "csharp", "go": "go", "rs": "rust", "rb": "ruby",
-    "php": "php", "sh": "shell", "bash": "shell", "zsh": "shell", "ps1": "powershell",
-    "bat": "batch", "sql": "sql", "r": "r", "lua": "lua", "pl": "perl", "scala": "scala",
-    "dart": "dart", "vue": "vue", "svelte": "svelte", "css": "css", "scss": "scss",
-    "html": "html", "htm": "html", "ipynb": "jupyter",
+    "py": "python",
+    "pyi": "python",
+    "js": "javascript",
+    "mjs": "javascript",
+    "cjs": "javascript",
+    "jsx": "javascript",
+    "ts": "typescript",
+    "tsx": "typescript",
+    "java": "java",
+    "kt": "kotlin",
+    "swift": "swift",
+    "c": "c",
+    "h": "c",
+    "cc": "cpp",
+    "cpp": "cpp",
+    "hpp": "cpp",
+    "cs": "csharp",
+    "go": "go",
+    "rs": "rust",
+    "rb": "ruby",
+    "php": "php",
+    "sh": "shell",
+    "bash": "shell",
+    "zsh": "shell",
+    "ps1": "powershell",
+    "bat": "batch",
+    "sql": "sql",
+    "r": "r",
+    "lua": "lua",
+    "pl": "perl",
+    "scala": "scala",
+    "dart": "dart",
+    "vue": "vue",
+    "svelte": "svelte",
+    "css": "css",
+    "scss": "scss",
+    "html": "html",
+    "htm": "html",
+    "ipynb": "jupyter",
 }
 
 _ZIP_MAGIC = (b"PK\x03\x04", b"PK\x05\x06")
@@ -125,7 +195,7 @@ def sniff_mime(path: Path) -> str:
     lang = CODE_LANGS.get(ext)
     if lang and (is_text or not head):
         return f"text/x-{lang}"
-    guessed, _ = mimetypes.guess_type(path.name, strict=False)
+    guessed = EXT_MIME.get(ext) or mimetypes.guess_type(path.name, strict=False)[0]
     if guessed:
         return guessed
     if is_text:
