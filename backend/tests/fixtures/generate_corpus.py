@@ -48,6 +48,9 @@ class Entry(BaseModel):
     misleading_name: bool = False
     generic_name: bool = False  # hard mode: "document (3).pdf", "scan0001.pdf", "IMG_0001.png"
     misleading_dir: bool = False  # hard mode: lives in an input folder themed for another category
+    # nested mode only: the deepest ancestor folder a careful human is certain about. `category`
+    # still holds one plausible leaf below it. None means the full `category` path is determinable.
+    ancestor_only: str | None = None
 
 
 class Manifest(BaseModel):
@@ -72,7 +75,6 @@ BASE_CATEGORIES = [
     "Photos/Screenshots",
     "Code",
 ]
-NESTED_CATEGORIES = ["Work/PayPal/Onboarding/Docs", "Work/PayPal/Meetings"]
 
 # kind -> (category, weight)
 KINDS: dict[str, tuple[str, float]] = {
@@ -85,10 +87,6 @@ KINDS: dict[str, tuple[str, float]] = {
     "photo": ("Photos/2024", 22),
     "screenshot": ("Photos/Screenshots", 10),
     "code_project": ("Code", 6),
-}
-NESTED_KINDS: dict[str, tuple[str, float]] = {
-    "onboarding_doc": ("Work/PayPal/Onboarding/Docs", 4),
-    "meeting_notes": ("Work/PayPal/Meetings", 3),
 }
 DOC_KINDS = {
     "invoice", "receipt", "tax_form", "resume", "lecture_notes", "lecture_slides",
@@ -298,6 +296,10 @@ class Made:
     files: dict[str, bytes] | None = None  # bundle folders (ext == "")
     lines: list[str] | None = None  # editable text, for making versions
     sparse: bool = False  # hard mode: near-empty / image-only document
+    # nested mode: ground-truth leaf, the ancestor-only marker, and a leaf-aware one-line version
+    category: str = ""
+    ancestor_only: str = ""
+    one_liner: str = ""
 
     @property
     def is_bundle(self) -> bool:
@@ -969,10 +971,11 @@ def make_sparse(rng: random.Random, m: Made) -> Made:
     """Replace a document by a near-empty version: one line of text, or an image-only scan."""
     assert m.lines is not None
     if rng.random() < 0.5:
-        sm = _doc(m.kind, m.stem, m.ext, [_one_liner(rng, m.kind)])
+        sm = _doc(m.kind, m.stem, m.ext, [m.one_liner or _one_liner(rng, m.kind)])
     else:
         sm = Made(m.kind, m.stem, "pdf", render_scan_pdf(rng, m.lines))
     sm.lines = None  # sparse docs are not re-versioned
+    sm.category, sm.ancestor_only = m.category, m.ancestor_only
     sm.sparse = True
     return sm
 
@@ -999,6 +1002,548 @@ def render_scan_pdf(rng: random.Random, lines: list[str]) -> bytes:
     return buf.getvalue()
 
 
+# --------------------------------------------------------------------------- nested mode (--nested)
+# A depth-4 tree where siblings differ only by content at each level (year, vendor, project name,
+# course code, trip vs. family photo). ~15% of input files are only determinable down to an
+# ancestor (`ancestor_only`); their `category` is one plausible leaf under that ancestor.
+
+NESTED_LEAVES = [
+    "Finance/Taxes/2024", "Finance/Taxes/2025",
+    "Finance/Invoices/Acme", "Finance/Invoices/Initech", "Finance/Receipts",
+    "Work/PayPal/Onboarding/Docs", "Work/PayPal/Onboarding/Forms", "Work/PayPal/Meetings",
+    "Work/Hooli/Projects/Atlas", "Work/Hooli/Projects/Beacon", "Work/Resumes",
+    "School/CS101/Lectures", "School/CS101/Assignments", "School/BIO150/Lectures",
+    "Photos/2024/Trips", "Photos/2024/Family", "Photos/Screenshots",
+    "Code",
+]
+NESTED_DOC_KINDS = {"form", "project_doc", "assignment", "work_doc", "school_doc", "finance_doc"}
+
+NESTED_VENDORS: dict[str, tuple[str, list[str]]] = {
+    "Acme": ("Acme Corp", ["Anvil fabrication", "Rocket skates", "Dynamite safety review",
+                           "Giant magnet rental", "Portable hole supply", "Bird seed bulk order"]),
+    "Initech": ("Initech", ["TPS report automation", "COBOL maintenance", "Printer firmware support",
+                            "Mainframe consulting", "Y2K remediation", "Stapler supply contract"]),
+}
+CLIENTS = [v for v in VENDORS if v not in ("Acme Corp", "Initech")]
+ONBOARDING_TOPICS = [
+    ("Team handbook", ["how the Payments team plans its quarters", "on-call expectations and escalation",
+                       "how we write and review design docs"]),
+    ("Security training guide", ["phishing and social engineering", "handling cardholder data",
+                                 "device encryption and VPN use"]),
+    ("Payments platform overview", ["how a transaction flows from checkout to settlement",
+                                    "the ledger and reconciliation services", "merchant onboarding"]),
+    ("First week schedule", ["Monday: laptop pickup and badge", "Tuesday: security module",
+                             "Thursday: meet your buddy and the team"]),
+    ("Engineering tooling guide", ["getting repo access", "the CI pipeline", "staging environments"]),
+]
+FORM_TITLES = [
+    "Direct deposit authorization", "Benefits enrollment form", "Equipment acknowledgment",
+    "Emergency contact form", "Confidentiality agreement signature page", "Tax withholding election",
+]
+FORM_FIELDS = ["Employee name", "Employee ID", "Manager", "Department", "Start date", "Home address",
+               "Phone number", "Account number", "Routing number", "Beneficiary"]
+HOOLI_PROJECTS: dict[str, tuple[str, list[str]]] = {
+    "Atlas": ("data warehouse migration", [
+        "warehouse schema migration", "shard rebalancing", "ETL cutover", "cold storage tiering",
+        "query planner upgrade", "backfill jobs"]),
+    "Beacon": ("mobile push notification service", [
+        "push delivery latency", "device token registry", "notification templates", "APNs gateway",
+        "quiet hours settings", "delivery receipts"]),
+}
+PROJECT_DOC_TYPES = ["status update", "design doc", "sprint report", "risk review"]
+SHARED_PROJECT_LINES = [
+    "QA signoff slipped by a few days", "Launch review is scheduled with the leads",
+    "Headcount request is pending approval", "Dependencies on the platform team are tracked weekly",
+    "Budget is on track for the quarter", "Stakeholders asked for a clearer rollout plan",
+    "Oncall load was light this sprint", "Documentation needs another pass",
+]
+NESTED_COURSES = {"CS101": "CS 101", "BIO150": "BIO 150"}
+ASSIGNMENT_TASKS = ["Implement", "Analyze the running time of", "Trace by hand", "Explain and give an example of",
+                    "Write test cases for", "Compare two approaches to"]
+TRIPS = [
+    ("Lisbon, Portugal", (38.72, -9.14), ["Tram 28 ride", "Belem tower", "Alfama market"]),
+    ("Kyoto, Japan", (35.01, 135.77), ["Fushimi Inari gates", "Arashiyama bamboo grove", "Tea house"]),
+    ("Banff, Canada", (51.18, -115.57), ["Lake Louise sunrise", "Gondola summit", "Trail to the falls"]),
+    ("Reykjavik, Iceland", (64.15, -21.94), ["Hallgrimskirkja", "Blue Lagoon", "Northern lights"]),
+    ("Oaxaca, Mexico", (17.07, -96.72), ["Monte Alban ruins", "Street food tour", "Zocalo evening"]),
+]
+FAMILY_EVENTS = [
+    "Mom's birthday dinner", "Sunday lunch at grandma's", "Kids soccer game", "Thanksgiving table",
+    "Backyard barbecue with the cousins", "Holiday morning with the kids", "Dad's retirement party",
+]
+HOME_GPS = (37.77, -122.42)
+
+NESTED_DIR_THEMES: dict[str, tuple[str, list[str]]] = {
+    "tax_form": ("Finance", DIR_THEMES["tax_form"]), "invoice": ("Finance", DIR_THEMES["invoice"]),
+    "receipt": ("Finance", DIR_THEMES["receipt"]), "finance_doc": ("Finance", ["Bills and invoices"]),
+    "resume": ("Work", DIR_THEMES["resume"]), "onboarding_doc": ("Work", DIR_THEMES["onboarding_doc"]),
+    "form": ("Work", ["New job", "Downloads/work"]), "meeting_notes": ("Work", DIR_THEMES["meeting_notes"]),
+    "project_doc": ("Work", ["Downloads/work", "Work stuff"]), "work_doc": ("Work", ["Work stuff"]),
+    "lecture_notes": ("School", DIR_THEMES["lecture_notes"]), "lecture_slides": ("School", DIR_THEMES["lecture_slides"]),
+    "assignment": ("School", ["Classes", "Downloads/school"]), "school_doc": ("School", ["Classes"]),
+    "photo": ("Photos", DIR_THEMES["photo"]), "screenshot": ("Photos", DIR_THEMES["screenshot"]),
+}
+NESTED_CROSS_STEMS = {
+    **CROSS_STEMS,
+    "form": ["lecture_notes", "invoice", "Untitled"],
+    "project_doc": ["lecture_notes", "taxes", "random_thoughts"],
+    "assignment": ["Resume_draft", "invoice", "meeting_notes"],
+    "work_doc": ["taxes_stuff", "lecture_week3", "Untitled"],
+    "school_doc": ["Resume_draft", "invoice_scan", "notes"],
+    "finance_doc": ["lecture_week3", "meeting_notes", "random"],
+}
+
+
+def _ndoc(kind: str, stem: str, ext: str, lines: list[str], one_liner: str) -> Made:
+    m = _doc(kind, stem, ext, lines)
+    m.one_liner = one_liner
+    return m
+
+
+def gen_tax_nested(rng: random.Random, year: int, hard: bool) -> Made:
+    who, employer, d = _person(rng), rng.choice(EMPLOYERS), _date(rng, year)
+    v = rng.randrange(6 if hard else 3)
+    ssn = f"XXX-XX-{rng.randint(1000, 9999)}"
+    one = f"Form {rng.choice(['W-2', '1099-NEC', '1040'])} tax year {year} - {_money(rng.randint(500_000, 9_000_000))}"
+    if v == 0:
+        lines = [f"Form W-2 Wage and Tax Statement {year}", "Department of the Treasury - Internal Revenue Service",
+                 f"Tax year: {year}", f"Recipient: {who}", f"SSN: {ssn}", f"Employer: {employer}",
+                 f"Box 1 Wages, tips, other compensation: {_money(rng.randint(4_000_000, 14_000_000))}",
+                 f"Box 2 Federal income tax withheld: {_money(rng.randint(400_000, 2_000_000))}",
+                 f"Box 17 State income tax: {_money(rng.randint(100_000, 800_000))}",
+                 f"Copy B - keep this copy for your {year} records."]
+        return _ndoc("tax_form", f"W-2_{year}_{employer.split()[0]}", "pdf", lines, one)
+    if v == 1:
+        lines = [f"Form 1099-NEC Nonemployee Compensation {year}", f"Tax year: {year}", f"Payer: {employer}",
+                 f"Recipient: {who}", f"SSN: {ssn}", f"Box 1 Nonemployee compensation: {_money(rng.randint(50_000, 9_000_000))}",
+                 f"Federal income tax withheld: {_money(rng.randint(0, 200_000))}",
+                 f"This is important {year} tax information."]
+        return _ndoc("tax_form", f"1099-NEC_{year}_{employer.split()[0]}", "pdf", lines, one)
+    if v == 2:
+        lines = [f"Form 1040 U.S. Individual Income Tax Return {year}", f"Tax year: {year}", f"Name: {who}",
+                 "Filing status: Single", f"Line 1a Wages: {_money(rng.randint(4_000_000, 14_000_000))}",
+                 f"Line 11 Adjusted gross income: {_money(rng.randint(4_000_000, 14_000_000))}",
+                 f"Line 24 Total tax: {_money(rng.randint(400_000, 2_000_000))}", "Standard deduction claimed",
+                 f"Sign here: ____________  Date: {d.isoformat()}"]
+        return _ndoc("tax_form", f"1040_{year}", "pdf", lines, one)
+    if v == 3:
+        lines = [f"Dear {who.split()[0]},", f"Enclosed is a summary of your {year} federal and state tax returns.",
+                 f"Tax year {year} adjusted gross income: {_money(rng.randint(4_000_000, 14_000_000))}",
+                 f"Total tax: {_money(rng.randint(400_000, 2_000_000))}",
+                 f"Refund expected: {_money(rng.randint(10_000, 400_000))}",
+                 f"Please review, sign Form 8879 and return it so we can e-file your {year} return.",
+                 f"Regards, {rng.choice(LAST)} & Co. CPAs"]
+        return _ndoc("tax_form", f"tax_return_summary_{year}", rng.choice(["pdf", "txt"]), lines, one)
+    if v == 4:
+        lines = [f"Form 1040-ES Estimated Tax Payment Voucher - tax year {year}",
+                 "Department of the Treasury - Internal Revenue Service", f"Name: {who}",
+                 f"Amount of estimated tax for {year}: {_money(rng.randint(80_000, 900_000))}",
+                 "Make check payable to United States Treasury"]
+        return _ndoc("tax_form", f"1040ES_voucher_{year}", "pdf", lines, one)
+    lines = [f"{year} tax prep worksheet - {who}", f"Deductible expenses paid in {year}:"]
+    for vendor, svc in zip(rng.sample(VENDORS, 4), rng.sample(SERVICES, 4), strict=True):
+        lines.append(f"{vendor} - {svc.lower()}: {_money(rng.randint(15_000, 480_000))}")
+    lines += [f"Total {year} deductions: {_money(rng.randint(600_000, 2_400_000))}", "Hand to accountant before filing."]
+    return _ndoc("tax_form", f"tax_prep_{year}", rng.choice(["md", "txt", "pdf"]), lines, one)
+
+
+def gen_invoice_nested(rng: random.Random, vkey: str, hard: bool, vendor_override: str | None = None) -> Made:
+    vendor, pool = NESTED_VENDORS[vkey] if vendor_override is None else (vendor_override, SERVICES)
+    client = rng.choice(CLIENTS)
+    vtag = vendor.split()[0]
+    d = _date(rng, 2025)
+    due = d + dt.timedelta(days=rng.choice([14, 30, 45]))
+    names = rng.sample(SERVICES if hard else pool, rng.randint(3, 5))
+    items = [(s, rng.randint(1, 20), rng.randint(2000, 45000)) for s in names]
+    sub = sum(q * u for _, q, u in items)
+    total = sub + sub * 8 // 100
+    num = f"INV-2025-{rng.randint(100, 9999):04d}"
+    one = f"{vendor} - payment due {due.isoformat()} - {_money(total)} owed"
+    v = rng.randrange(4 if hard else 1)
+    if v == 0:
+        lines = [vendor, "INVOICE", f"Invoice number: {num}", f"Invoice date: {d.isoformat()}",
+                 f"Due date: {due.isoformat()}", f"Bill to: {client}", _address(rng),
+                 "Description | Qty | Unit price | Amount"]
+        lines += [f"{s} | {q} | {_money(u)} | {_money(q * u)}" for s, q, u in items]
+        lines += [f"Subtotal: {_money(sub)}", f"Sales tax (8%): {_money(sub * 8 // 100)}",
+                  f"Total due: {_money(total)}", "Payment terms: Net 30",
+                  f"Please remit payment to {vendor}, {_address(rng)}", "Thank you for your business."]
+        return _ndoc("invoice", f"Invoice_{vtag}_{num[-4:]}", "pdf", lines, one)
+    if v == 1:
+        lines = [f"{vendor} - Statement of charges", f"Account holder: {client}", f"Period ending: {d.isoformat()}",
+                 "Item | Qty | Rate | Charge"]
+        lines += [f"{s} | {q} | {_money(u)} | {_money(q * u)}" for s, q, u in items]
+        lines += [f"Amount due: {_money(total)}", f"Pay by {due.isoformat()}", f"Remit to {vendor}."]
+        return _ndoc("invoice", f"{vtag}_statement_{d:%b%Y}", "pdf", lines, one)
+    if v == 2:
+        lines = ["BILL", vendor, f"Customer: {client}", f"Issued: {d.isoformat()}"]
+        lines += [f"{s} - {_money(q * u)}" for s, q, u in items]
+        lines += [f"Balance owed: {_money(total)}", f"Please pay {vendor} within {(due - d).days} days."]
+        return _ndoc("invoice", f"{vtag}_bill_{num[-4:]}", "pdf", lines, one)
+    lines = [f"Subject: Payment due for work completed - {vendor}", f"Hi {rng.choice(FIRST)},",
+             f"Here is what you owe {vendor} for {items[0][0].lower()} and {items[1][0].lower()}."]
+    lines += [f"  {s}: {_money(q * u)}" for s, q, u in items]
+    lines += [f"Total owed: {_money(total)}", f"Please wire the money by {due.isoformat()}.",
+              f"Thanks, {vendor} accounts team"]
+    return _ndoc("invoice", f"{vtag}_email_{d:%b%Y}", rng.choice(["txt", "md"]), lines, one)
+
+
+def gen_onboarding_doc_nested(rng: random.Random, hard: bool) -> Made:
+    title, sections = rng.choice(ONBOARDING_TOPICS)
+    one = f"PayPal onboarding guide: {title}"
+    if hard and rng.random() < 0.4:
+        lines = [f"Welcome to PayPal, {_person(rng).split()[0]}!", f"Your manager: {_person(rng)}",
+                 f"This guide covers: {title.lower()}.", "Day one: pick up your laptop and badge from the front desk",
+                 "Week one: shadow the Payments team", f"Questions? Ask your buddy, {rng.choice(FIRST)}."]
+        return _ndoc("onboarding_doc", "welcome_to_PayPal_" + title.split()[0].lower(), rng.choice(["pdf", "md"]), lines, one)
+    lines = [f"PayPal onboarding guide: {title}", "Welcome to the Payments team.",
+             "This guide explains what you need to know in your first weeks."]
+    for i, sec in enumerate(sections):
+        lines += [f"Section {i + 1}: {sec.capitalize()}",
+                  f"You will learn {sec}. Read it before your first sprint and ask your buddy if anything is unclear.",
+                  f"Related reading: the {rng.choice(['wiki', 'runbook', 'handbook'])} page on {sec.split()[0]}."]
+    return _ndoc("onboarding_doc", "PayPal_" + title.replace(" ", "_"), rng.choice(["pdf", "md"]), lines, one)
+
+
+def gen_form_nested(rng: random.Random, hard: bool) -> Made:
+    title = rng.choice(FORM_TITLES)
+    one = f"PayPal form - {title} - sign and return to HR"
+    if hard and rng.random() < 0.4:
+        who = _person(rng)
+        lines = [f"PayPal policy acknowledgment - {title}",
+                 f"I, {who}, confirm that I have read the PayPal code of conduct and this {title.lower()}.",
+                 "Signature: ____________", f"Date: {_date(rng, 2025).isoformat()}",
+                 "Return the signed form to HR within your first five days."]
+        return _ndoc("form", "acknowledgment_" + title.split()[0].lower(), rng.choice(["pdf", "md"]), lines, one)
+    lines = [f"PayPal HR Form {rng.randint(10, 99)}: {title}", "Please print clearly and complete every field."]
+    lines += [f"{f}: ____________________" for f in rng.sample(FORM_FIELDS, rng.randint(4, 6))]
+    lines += ["I certify that the information above is correct.", "Employee signature: ____________   Date: ________",
+              "Return the completed form to People Operations."]
+    return _ndoc("form", "PayPal_" + title.replace(" ", "_") + "_form", rng.choice(["pdf", "md"]), lines, one)
+
+
+def gen_paypal_meeting_nested(rng: random.Random, hard: bool) -> Made:
+    title = rng.choice(MEETINGS)
+    thing = rng.choice(["ledger migration", "fraud rules", "checkout latency fix", "API v3"])
+    one = f"PayPal Payments team meeting notes - action: {rng.choice(['ship', 'review', 'defer'])} the API v3"
+    if hard and rng.random() < 0.5:
+        lines = [f"{title} recap - PayPal Payments", f"- Key takeaway: the {thing} slipped one week",
+                 f"- Decision: keep the {thing} in the current quarter", f"- Owner: {rng.choice(FIRST)}",
+                 "- Customers affected: merchants on the PayPal payments platform", "- Follow-up scheduled"]
+        return _ndoc("meeting_notes", title.replace(" ", "_") + "_recap", rng.choice(["md", "txt"]), lines, one)
+    lines = [f"PayPal Payments - {title} - meeting notes", f"Date: {_date(rng, 2025).isoformat()}",
+             f"Attendees: {_person(rng)}, {_person(rng)}, {_person(rng)}"]
+    for _ in range(rng.randint(5, 8)):
+        lines.append(f"- {rng.choice(['Action', 'Decision', 'Risk', 'Follow-up'])}: "
+                     f"{rng.choice(['ship', 'review', 'defer', 'escalate'])} the {thing} ({rng.choice(FIRST)} owns)")
+    return _ndoc("meeting_notes", title.replace(" ", "_").replace(":", ""), rng.choice(["md", "txt"]), lines, one)
+
+
+def gen_project_doc(rng: random.Random, name: str, hard: bool) -> Made:
+    summary, terms = HOOLI_PROJECTS[name]
+    doc = rng.choice(PROJECT_DOC_TYPES)
+    d = _date(rng, 2025)
+    one = f"Hooli Project {name} - {doc} {d.isoformat()}: {rng.choice(terms)} on track"
+    lines = [f"Hooli Project {name} - {doc}", f"Date: {d.isoformat()}", f"Owner: {_person(rng)}"]
+    if hard:  # mostly shared project-management vocabulary; the name appears a few times, the topic once
+        lines += [f"Summary: Project {name} ({summary}) is progressing.", *rng.sample(SHARED_PROJECT_LINES, 4),
+                  f"- {rng.choice(['Milestone', 'Risk', 'Blocker'])}: {rng.choice(terms)}",
+                  f"Next review of Project {name}: {_date(rng, 2025).isoformat()}"]
+    else:
+        for _ in range(rng.randint(6, 9)):
+            lines.append(f"- {rng.choice(['Milestone', 'Risk', 'Decision', 'Blocker'])}: "
+                         f"{rng.choice(['finish', 'review', 'defer', 'escalate'])} {rng.choice(terms)} "
+                         f"({rng.choice(FIRST)} owns)")
+        lines.append(f"Project {name} goal: {summary}.")
+    return _ndoc("project_doc", f"{name}_{doc.replace(' ', '_')}", rng.choice(["md", "pdf", "txt"]), lines, one)
+
+
+def gen_lecture_nested(rng: random.Random, key: str, hard: bool) -> Made:
+    course = NESTED_COURSES[key]
+    topic, terms = COURSES[course]
+    wk = rng.randint(1, 14)
+    a, b, c = rng.sample(terms, 3)
+    one = f"{course} {topic}: {a}, {b}, {c} - lecture notes"
+    v = rng.randrange(5 if hard else 2)
+    if v == 0:
+        lines = [f"{course} - {topic} - Lecture {wk} notes", f"Date: {_date(rng, 2025).isoformat()}",
+                 f"Topics today: {a}, {b}, {c}"] + _sentences(rng, topic, terms, rng.randint(10, 14))
+        return _ndoc("lecture_notes", f"{key}_week{wk}_notes", rng.choice(["md", "txt"]), lines, one)
+    if v == 1:
+        lines = [f"{course}: {topic} - Lecture {wk}"]
+        for t in rng.sample(terms, 4):
+            lines += [f"Slide: {t.capitalize()}", f"- Why {t} matters in {topic}", f"- Worked example involving {t}"]
+        m = _ndoc("lecture_slides", f"{key}_L{wk}_slides", "pptx" if _pptx else "md", lines, one)
+        return m
+    if v == 2:  # Cornell style
+        lines = [f"{course} week {wk}", "Cues | Notes", f"{a} | what it is, why it matters in {topic}",
+                 f"{b} | contrast with {c}; prof gave two examples", f"{c} | likely on the exam"]
+    elif v == 3:  # scrappy outline
+        lines = [f"{course} {topic.lower()} - {_date(rng, 2025):%b %d}", f"* {a}: prof spent 20 min on this",
+                 f"* {b} (see textbook ch. {rng.randint(2, 12)})", f"  - ties back to {c}",
+                 f"Q for office hours: why does {b} not apply to {c}?"]
+    else:  # textbook reading notes
+        lines = [f"{course} {topic} - chapter {rng.randint(1, 12)} reading notes", f"Key term: {a}",
+                 f"Definition: {a} describes how a system relates to {b}.", f"Key term: {c}",
+                 f"Example in the text uses {b}; the lecture added {c}."]
+    return _ndoc("lecture_notes", rng.choice([f"{key}_wk{wk}", f"notes_{wk}_{topic.split()[0]}"]),
+                 rng.choice(["md", "txt"]), lines, one)
+
+
+def gen_assignment(rng: random.Random, hard: bool) -> Made:
+    course = NESTED_COURSES["CS101"]
+    topic, terms = COURSES[course]
+    k = rng.randint(1, 9)
+    due = _date(rng, 2025)
+    probs = rng.sample(terms, rng.randint(3, 4))
+    one = f"{course} Assignment {k} - due {due.isoformat()} - {', '.join(probs[:2])}"
+    v = rng.randrange(3 if hard else 1)
+    if v == 1:
+        lines = [f"Subject: {course} homework {k} reminder", "Hi all,",
+                 f"Homework {k} for {course} is due {due.isoformat()}. It covers {', '.join(probs)}.",
+                 "Submit your solutions through the course portal. No late work after the grace period.",
+                 f"Office hours are on Thursdays. - TA {rng.choice(FIRST)}"]
+        return _ndoc("assignment", f"hw{k}_reminder", rng.choice(["txt", "md"]), lines, one)
+    if v == 2:
+        lines = [f"{course} Lab {k} handout", f"Due: {due.isoformat()}", "Starter code is provided in the course repository."]
+        lines += [f"Task {i + 1}: {rng.choice(ASSIGNMENT_TASKS)} {p}." for i, p in enumerate(probs)]
+        lines.append("Grading: correctness 70%, style 30%.")
+        return _ndoc("assignment", f"lab{k}", "pdf", lines, one)
+    lines = [f"{course} - Assignment {k}: {topic}", f"Due: {due.isoformat()}  Total: 100 points"]
+    lines += [f"Problem {i + 1} ({rng.choice([10, 15, 20, 25])} pts): {rng.choice(ASSIGNMENT_TASKS)} {p}."
+              for i, p in enumerate(probs)]
+    lines += ["Submission: upload a single PDF to the course portal before the deadline.",
+              "Late policy: 10% penalty per day."]
+    return _ndoc("assignment", f"{NESTED_COURSES['CS101'].replace(' ', '')}_Assignment{k}", rng.choice(["pdf", "pdf", "md"]), lines, one)
+
+
+def _dms(x: float) -> tuple[float, float, float]:
+    x = abs(x)
+    return (float(int(x)), float(int((x - int(x)) * 60)), round(((x - int(x)) * 60 % 1) * 60, 1))
+
+
+def _photo_nested(rng: random.Random, desc: str | None, gps: tuple[float, float] | None, stem_hint: str) -> Made:
+    img = _base_image(rng, 640, 480)
+    d = ImageDraw.Draw(img)
+    for _ in range(rng.randint(4, 9)):
+        x, y = rng.randrange(600), rng.randrange(440)
+        r = rng.randint(20, 120)
+        d.ellipse((x, y, x + r, y + r), fill=(rng.randrange(256), rng.randrange(256), rng.randrange(256)))
+    make, model = rng.choice(PHOTO_CAMERAS)
+    when = dt.datetime(2024, 1, 1) + dt.timedelta(seconds=rng.randrange(366 * 86400))
+    stamp = when.strftime("%Y:%m:%d %H:%M:%S")
+    exif = Image.Exif()
+    exif[0x010F], exif[0x0110], exif[0x0132] = make, model, stamp
+    if desc:
+        exif[0x010E] = desc
+    sub = exif.get_ifd(0x8769)
+    sub[0x9003] = sub[0x9004] = stamp
+    sub[0xA434] = f"{model} lens {rng.choice([24, 35, 50, 85])}mm"
+    if gps:
+        g = exif.get_ifd(0x8825)
+        g[1], g[2] = ("N" if gps[0] >= 0 else "S"), _dms(gps[0])
+        g[3], g[4] = ("E" if gps[1] >= 0 else "W"), _dms(gps[1])
+    buf = io.BytesIO()
+    img.save(buf, "JPEG", quality=85, exif=exif)
+    stem = stem_hint if stem_hint else f"IMG_{rng.randint(1000, 9999)}"
+    return Made("photo", stem, rng.choice(["jpg", "jpg", "jpeg"]), buf.getvalue())
+
+
+def gen_photo_trip(rng: random.Random, hard: bool) -> Made:
+    place, gps, scenes = rng.choice(TRIPS)
+    scene = rng.choice(scenes)
+    stem = "" if hard or rng.random() < 0.5 else f"{place.split(',')[0]} {scene.split()[0]} {rng.randint(1, 40)}"
+    return _photo_nested(rng, f"{place} trip - {scene}", gps, stem)
+
+
+def gen_photo_family(rng: random.Random, hard: bool) -> Made:
+    ev = rng.choice(FAMILY_EVENTS)
+    stem = "" if hard or rng.random() < 0.5 else f"{ev.split()[0]} {ev.split()[-1]} {rng.randint(1, 40)}"
+    return _photo_nested(rng, f"Family - {ev}", HOME_GPS, stem)
+
+
+# ---- ancestor-only documents: a careful human can only say which ancestor folder they belong to
+
+
+def gen_anc_paypal(rng: random.Random, hard: bool) -> Made:
+    v = rng.randrange(3)
+    who = _person(rng)
+    if v == 0:
+        lines = ["PayPal Payments team - weekly update", f"Date: {_date(rng, 2025).isoformat()}",
+                 "Status: the team is on track for the quarter.", f"Contact {rng.choice(FIRST)} with questions.",
+                 "Please review the attached material and note the upcoming dates."]
+        stem = "PayPal_team_update"
+    elif v == 1:
+        lines = [f"PayPal Payments - notes for {who.split()[0]}", f"Date: {_date(rng, 2025).isoformat()}",
+                 "Topics: payments platform, team structure, upcoming milestones.",
+                 f"Follow up with {rng.choice(FIRST)} and {rng.choice(FIRST)} next week."]
+        stem = "PayPal_notes"
+    else:
+        lines = ["PayPal - Payments platform", "Overview for the team.", "Please read before the next session.",
+                 f"Prepared by {who}."]
+        stem = "PayPal_payments_overview"
+    return _ndoc("work_doc", stem, rng.choice(["md", "pdf", "txt"]), lines, "PayPal Payments team update - see attached")
+
+
+def gen_anc_paypal_onboarding(rng: random.Random, hard: bool) -> Made:
+    who = _person(rng)
+    lines = [f"Welcome to PayPal, {who.split()[0]}!", f"Your start date is {_date(rng, 2025).isoformat()}.",
+             "Before your first day, review the onboarding material and complete the new hire paperwork.",
+             "Day one: pick up your laptop and badge from the front desk.", "People Operations will follow up."]
+    return _ndoc("work_doc", "PayPal_new_hire_welcome", rng.choice(["md", "pdf", "txt"]), lines,
+                 "PayPal new hire: laptop pickup Monday, badge at front desk")
+
+
+def gen_anc_hooli_projects(rng: random.Random, hard: bool) -> Made:
+    d = _date(rng, 2025)
+    lines = ["Hooli Projects portfolio overview", f"Date: {d.isoformat()}", f"Owner: {_person(rng)}",
+             "Active projects: Atlas and Beacon.", *rng.sample(SHARED_PROJECT_LINES, 4),
+             "Both Project Atlas and Project Beacon are reviewed at the monthly portfolio meeting."]
+    return _ndoc("work_doc", "Hooli_projects_overview", rng.choice(["md", "pdf", "txt"]), lines,
+                 f"Hooli projects portfolio overview {d.isoformat()}: Atlas and Beacon")
+
+
+def gen_anc_hooli(rng: random.Random, hard: bool) -> Made:
+    d = _date(rng, 2025)
+    topic = rng.choice(["all-hands agenda", "offsite logistics", "contractor onboarding", "security reminder"])
+    lines = [f"Hooli - {topic}", f"Date: {d.isoformat()}", f"Organizer: {_person(rng)}",
+             *rng.sample(SHARED_PROJECT_LINES, 3), "Details to follow by email."]
+    return _ndoc("work_doc", "Hooli_" + topic.replace(" ", "_"), rng.choice(["md", "pdf", "txt"]), lines,
+                 f"Hooli - {topic} {d.isoformat()}")
+
+
+def gen_anc_taxes(rng: random.Random, hard: bool) -> Made:
+    who = _person(rng)
+    lines = [f"Tax document checklist - {who}", "Gather before meeting with your accountant:",
+             "- W-2 from each employer", "- 1099 forms for freelance income", "- Mortgage interest statement (Form 1098)",
+             "- Charitable donation receipts", f"Questions? Contact {rng.choice(LAST)} & Co. CPAs."]
+    return _ndoc("tax_form", "tax_checklist", rng.choice(["md", "txt", "pdf"]), lines,
+                 "Tax document checklist - gather W-2s, 1099s and receipts for your CPA")
+
+
+def gen_anc_invoice(rng: random.Random, hard: bool) -> Made:
+    return gen_invoice_nested(rng, "Acme", hard, vendor_override=rng.choice(CLIENTS))
+
+
+def gen_anc_finance(rng: random.Random, hard: bool) -> Made:
+    d = _date(rng, 2025)
+    lines = [f"Monthly account summary - {d:%B %Y}", f"Account ending {rng.randint(1000, 9999)}",
+             f"Opening balance: {_money(rng.randint(100_000, 900_000))}"]
+    for _ in range(rng.randint(4, 7)):
+        lines.append(f"{_date(rng, 2025).isoformat()}  {rng.choice(['Card purchase', 'Transfer', 'Direct debit', 'Deposit'])}  "
+                     f"{_money(rng.randint(500, 250_000))}")
+    lines.append(f"Closing balance: {_money(rng.randint(100_000, 900_000))}")
+    return _ndoc("finance_doc", f"account_summary_{d:%b%Y}", "pdf", lines,
+                 f"Monthly account summary {d:%B %Y} - closing balance {_money(rng.randint(100_000, 900_000))}")
+
+
+def gen_anc_cs101(rng: random.Random, hard: bool) -> Made:
+    course = NESTED_COURSES["CS101"]
+    topic, terms = COURSES[course]
+    lines = [f"{course} {topic} - course syllabus", "Instructor office hours: Tuesday and Thursday",
+             f"Topics this term: {', '.join(rng.sample(terms, 4))}", "Grading: assignments 40%, midterm 25%, final 35%",
+             "Lectures are on Monday and Wednesday; assignments are posted weekly."]
+    return _ndoc("school_doc", "CS101_syllabus", rng.choice(["md", "pdf", "txt"]), lines,
+                 f"{course} {topic} - course syllabus")
+
+
+def gen_anc_school(rng: random.Random, hard: bool) -> Made:
+    lines = ["Fall semester study schedule", f"Week of {_date(rng, 2025).isoformat()}",
+             f"CS 101 midterm: {_date(rng, 2025).isoformat()}", f"BIO 150 midterm: {_date(rng, 2025).isoformat()}",
+             "Plan: review lecture notes, finish assignments, book a study room.", "Library hours extended during exams."]
+    return _ndoc("school_doc", "study_schedule", rng.choice(["md", "txt", "pdf"]), lines,
+                 "Fall semester study schedule - CS 101 and BIO 150 midterms")
+
+
+def gen_anc_photo(rng: random.Random, hard: bool) -> Made:
+    return _photo_nested(rng, None, None, "")
+
+
+def _gen_receipt_n(rng: random.Random, hard: bool) -> Made:
+    return (gen_receipt_hard if hard else gen_receipt)(rng)
+
+
+def _gen_resume_n(rng: random.Random, hard: bool) -> Made:
+    return (gen_resume_hard if hard else gen_resume)(rng)
+
+
+def _gen_shot_n(rng: random.Random, hard: bool) -> Made:
+    return (gen_screenshot_hard if hard else gen_screenshot)(rng)
+
+
+def _gen_code_n(rng: random.Random, hard: bool) -> Made:
+    return gen_code_project(rng)
+
+
+NestedGen = Callable[[random.Random, bool], Made]
+
+
+@dataclass(frozen=True)
+class _Slot:
+    weight: float
+    make: NestedGen
+    examples: int = 0  # pre-seeded output/ files (leaf slots only)
+    ancestor: str = ""  # ancestor-only slot: the deepest certain ancestor
+    plausible: tuple[str, ...] = ()  # leaves the ground-truth `category` may be drawn from
+
+
+def _leaf_slots() -> dict[str, _Slot]:
+    s: dict[str, _Slot] = {}
+
+    def leaf(cat: str, weight: float, examples: int, fn: NestedGen) -> None:
+        s[cat] = _Slot(weight, fn, examples)
+
+    leaf("Finance/Taxes/2024", 4, 1, lambda r, h: gen_tax_nested(r, 2024, h))
+    leaf("Finance/Taxes/2025", 5, 2, lambda r, h: gen_tax_nested(r, 2025, h))
+    leaf("Finance/Invoices/Acme", 7, 2, lambda r, h: gen_invoice_nested(r, "Acme", h))
+    leaf("Finance/Invoices/Initech", 6, 1, lambda r, h: gen_invoice_nested(r, "Initech", h))
+    leaf("Finance/Receipts", 9, 3, _gen_receipt_n)
+    leaf("Work/PayPal/Onboarding/Docs", 4, 2, gen_onboarding_doc_nested)
+    leaf("Work/PayPal/Onboarding/Forms", 4, 1, gen_form_nested)
+    leaf("Work/PayPal/Meetings", 5, 2, gen_paypal_meeting_nested)
+    leaf("Work/Hooli/Projects/Atlas", 5, 2, lambda r, h: gen_project_doc(r, "Atlas", h))
+    leaf("Work/Hooli/Projects/Beacon", 5, 1, lambda r, h: gen_project_doc(r, "Beacon", h))
+    leaf("Work/Resumes", 3, 1, _gen_resume_n)
+    leaf("School/CS101/Lectures", 5, 3, lambda r, h: gen_lecture_nested(r, "CS101", h))
+    leaf("School/CS101/Assignments", 4, 2, lambda r, h: gen_assignment(r, h))
+    leaf("School/BIO150/Lectures", 5, 1, lambda r, h: gen_lecture_nested(r, "BIO150", h))
+    leaf("Photos/2024/Trips", 6, 2, gen_photo_trip)
+    leaf("Photos/2024/Family", 6, 2, gen_photo_family)
+    leaf("Photos/Screenshots", 6, 2, _gen_shot_n)
+    leaf("Code", 4, 2, _gen_code_n)
+    assert sorted(s) == sorted(NESTED_LEAVES)
+
+    def anc(path: str, weight: float, fn: NestedGen, plausible: tuple[str, ...]) -> None:
+        assert all(p in s and p.startswith(path + "/") for p in plausible), path
+        s["~" + path] = _Slot(weight, fn, 0, path, plausible)
+
+    anc("Work/PayPal", 2.5, gen_anc_paypal, ("Work/PayPal/Onboarding/Docs", "Work/PayPal/Meetings"))
+    anc("Work/PayPal/Onboarding", 2, gen_anc_paypal_onboarding,
+        ("Work/PayPal/Onboarding/Docs", "Work/PayPal/Onboarding/Forms"))
+    anc("Work/Hooli/Projects", 2, gen_anc_hooli_projects, ("Work/Hooli/Projects/Atlas", "Work/Hooli/Projects/Beacon"))
+    anc("Work/Hooli", 1, gen_anc_hooli, ("Work/Hooli/Projects/Atlas", "Work/Hooli/Projects/Beacon"))
+    anc("Finance/Taxes", 2, gen_anc_taxes, ("Finance/Taxes/2024", "Finance/Taxes/2025"))
+    anc("Finance/Invoices", 1.5, gen_anc_invoice, ("Finance/Invoices/Acme", "Finance/Invoices/Initech"))
+    anc("Finance", 1, gen_anc_finance, ("Finance/Receipts", "Finance/Taxes/2025"))
+    anc("School/CS101", 1.5, gen_anc_cs101, ("School/CS101/Lectures", "School/CS101/Assignments"))
+    anc("School", 1, gen_anc_school, ("School/CS101/Lectures", "School/BIO150/Lectures"))
+    anc("Photos/2024", 1.5, gen_anc_photo, ("Photos/2024/Trips", "Photos/2024/Family"))
+    return s
+
+
+NESTED_SLOTS = _leaf_slots()
+
+
+def make_nested(rng: random.Random, slot: _Slot, cat: str, hard: bool) -> Made:
+    """Generate one file for a slot and stamp its ground truth on the Made."""
+    m = slot.make(rng, hard)
+    if slot.ancestor:
+        m.category, m.ancestor_only = rng.choice(slot.plausible), slot.ancestor
+    else:
+        m.category = cat
+    return m
+
+
 # --------------------------------------------------------------------------- derived files
 
 
@@ -1021,7 +1566,8 @@ def make_version(rng: random.Random, src: Made) -> Made:
     idx = list(range(1, len(lines)))
     for i in rng.sample(idx, max(1, round(0.3 * len(idx)))):
         lines[i] = _extra_line(rng, src.kind)
-    return Made(src.kind, src.stem, src.ext, RENDERERS[src.ext.lower()](lines), lines=lines)
+    return Made(src.kind, src.stem, src.ext, RENDERERS[src.ext.lower()](lines), lines=lines,
+                category=src.category, ancestor_only=src.ancestor_only, one_liner=src.one_liner)
 
 
 def make_resized(src: Made) -> Made:
@@ -1033,7 +1579,8 @@ def make_resized(src: Made) -> Made:
         small.save(buf, "PNG")
     else:
         small.save(buf, "JPEG", quality=80, **({"exif": exif} if exif else {}))
-    return Made(src.kind, src.stem, src.ext, buf.getvalue())
+    return Made(src.kind, src.stem, src.ext, buf.getvalue(),
+                category=src.category, ancestor_only=src.ancestor_only)
 
 
 # --------------------------------------------------------------------------- placement
@@ -1107,10 +1654,15 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
     gens = HARD_GENERATORS if hard else GENERATORS
     kinds = dict(KINDS)
     categories = list(BASE_CATEGORIES)
-    if nested:
-        kinds.update(NESTED_KINDS)
-        categories += NESTED_CATEGORIES
     kind_table = [(k, w) for k, (_, w) in sorted(kinds.items())]
+    if nested:  # a depth-4 tree replaces the flat categories; slots are leaves or ancestor-only groups
+        kinds, categories = {}, list(NESTED_LEAVES)
+        kind_table = [(k, sl.weight) for k, sl in sorted(NESTED_SLOTS.items())]
+    cross_stems = NESTED_CROSS_STEMS if nested else CROSS_STEMS
+    doc_kinds = DOC_KINDS | NESTED_DOC_KINDS if nested else DOC_KINDS
+
+    def cat_of(m: Made) -> str:
+        return m.category or kinds[m.kind][0]
 
     if out.exists():
         shutil.rmtree(out)
@@ -1121,7 +1673,14 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
 
     # ---- pre-seeded output examples (clean names, a few per category)
     namer_out = _Namer()
-    for kind, (cat, _) in sorted(kinds.items()):
+    if nested:  # 1-3 examples per leaf, so every subtree has a centroid
+        for cat, slot in sorted(NESTED_SLOTS.items()):
+            for _ in range(slot.examples):
+                m = make_nested(rng, slot, cat, hard)
+                name = namer_out.claim(cat, _full_name(m))
+                _write(out / "output", f"{cat}/{name}", m)
+                manifest.examples.append(Entry(rel_path=f"{cat}/{name}", category=cat, kind=m.kind))
+    for kind, (cat, _) in ([] if nested else sorted(kinds.items())):
         count = 2 if kind == "code_project" else (3 if kind not in ("lecture_slides",) else 2)
         for _ in range(count):
             m = gens[kind](rng)
@@ -1142,7 +1701,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
         name = namer.claim(dir_, name)
         rel = f"{dir_}/{name}" if dir_ else name
         kind = m.kind
-        entry = Entry(rel_path=rel, category=kinds[kind][0], kind=kind, **entry_kw)
+        entry = Entry(rel_path=rel, category=cat_of(m), kind=kind, ancestor_only=m.ancestor_only or None,
+                      **entry_kw)
         _write(out / "input", rel, m)
         p = _Placed(m, entry, dir_)
         placed.append(p)
@@ -1151,18 +1711,28 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
     base: list[_Placed] = []
     for _ in range(n_base):
         kind = _weighted(rng, kind_table)
-        m = gens[kind](rng)
-        if hard and kind in DOC_KINDS and rng.random() < 0.10:
+        if nested:
+            m = make_nested(rng, NESTED_SLOTS[kind], kind, hard)
+            kind = m.kind
+        else:
+            m = gens[kind](rng)
+        if hard and kind in doc_kinds and rng.random() < 0.10:
             m = make_sparse(rng, m)
         dir_ = _weighted(rng, [(d, w) for d, w in INPUT_DIRS])
         bad_dir = False
         if hard and not m.is_bundle:
             r = rng.random()
-            if r < 0.08:  # a folder that happens to be right
-                dir_ = rng.choice(DIR_THEMES[kind])
-            elif r < 0.15:  # a folder themed for a different category
+            if nested:
+                right = NESTED_DIR_THEMES[kind][1]
+                wrong = sorted({d for g, ds in NESTED_DIR_THEMES.values() if g != cat_of(m).split("/")[0]
+                                for d in ds} - set(right))
+            else:
+                right = DIR_THEMES[kind]
                 wrong = sorted({d for k, ds in DIR_THEMES.items() if kinds.get(k, ("",))[0] != kinds[kind][0]
                                 for d in ds} - set(DIR_THEMES[kind]))
+            if r < 0.08:  # a folder that happens to be right
+                dir_ = rng.choice(right)
+            elif r < 0.15:  # a folder themed for a different category
                 dir_, bad_dir = rng.choice(wrong), True
         if m.is_bundle:  # keep projects near the top level, as people do
             dir_ = rng.choice(["", "", "Desktop stuff"])
@@ -1189,14 +1759,14 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
         rest = [b for b in candidates if id(b) not in taken]
         mislead = rng.sample(rest, min(n_pick, len(rest)))
         for b in mislead:
-            rename(b, rng.choice(CROSS_STEMS[b.made.kind]))
+            rename(b, rng.choice(cross_stems[b.made.kind]))
             b.entry.misleading_name = True
     else:  # misleading names (~5% of non-bundle base files)
         n_mis = round(0.05 * len(base))
         for b in rng.sample(candidates, min(n_mis, len(candidates))):
-            pool = GENERIC_STEMS + CROSS_STEMS.get(b.made.kind, []) * 2
+            pool = GENERIC_STEMS + cross_stems.get(b.made.kind, []) * 2
             if b.made.kind in IMAGE_KINDS:
-                pool = CROSS_STEMS[b.made.kind]
+                pool = cross_stems[b.made.kind]
             rename(b, rng.choice(pool))
             b.entry.misleading_name = True
 
@@ -1237,9 +1807,15 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
 
     manifest.entries = sorted((p.entry for p in placed), key=lambda e: e.rel_path)
     skip: Any = {}
-    if not hard:  # keep the default-mode manifest.json byte-identical to the pre-hard format
-        extra = {"generic_name", "misleading_dir"}
-        skip = {"hard": True, "entries": {"__all__": extra}, "examples": {"__all__": extra}}
+    extra: set[str] = set()  # keep non-hard / non-nested manifest.json byte-identical to older formats
+    if not hard:
+        extra |= {"generic_name", "misleading_dir"}
+    if not nested:
+        extra.add("ancestor_only")
+    if extra:
+        skip = {"entries": {"__all__": extra}, "examples": {"__all__": extra}}
+    if not hard:
+        skip["hard"] = True
     (out / "manifest.json").write_text(manifest.model_dump_json(indent=2, exclude=skip), encoding="utf-8")
     return manifest
 

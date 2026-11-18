@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -10,9 +11,30 @@ from sqlmodel import SQLModel, create_engine
 
 from swipesort.db import models  # noqa: F401  (register tables)
 
+# Bump whenever a table/column changes. Session state is short-lived, so instead of migrations
+# an outdated database file is moved aside (never deleted) and a fresh one is created.
+SCHEMA_VERSION = 4
+
+
+def _version(path: Path) -> int:
+    con = sqlite3.connect(path)
+    try:
+        return int(con.execute("PRAGMA user_version").fetchone()[0])
+    finally:
+        con.close()
+
 
 def make_engine(db_path: Path | str) -> Engine:
-    url = "sqlite://" if str(db_path) == ":memory:" else f"sqlite:///{Path(db_path)}"
+    memory = str(db_path) == ":memory:"
+    if not memory:
+        path = Path(db_path)
+        if path.exists() and path.stat().st_size > 0 and _version(path) != SCHEMA_VERSION:
+            backup = path.with_name(f"{path.name}.v{_version(path)}.bak")
+            for suffix in ("", "-wal", "-shm"):
+                src = Path(str(path) + suffix)
+                if src.exists():
+                    src.replace(Path(str(backup) + suffix))
+    url = "sqlite://" if memory else f"sqlite:///{Path(db_path)}"
     eng = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
 
     @event.listens_for(eng, "connect")
@@ -23,6 +45,8 @@ def make_engine(db_path: Path | str) -> Engine:
         cur.close()
 
     SQLModel.metadata.create_all(eng)
+    with eng.begin() as conn:
+        conn.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
     return eng
 
 

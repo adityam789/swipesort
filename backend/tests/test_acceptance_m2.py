@@ -30,6 +30,7 @@ def _setup(tmp_path: Path) -> tuple[TestClient, int, Path, dict[str, str]]:
     m = generate(tmp_path / "c", n=120, seed=5)
     s = Settings()
     s.models.provider = "fake"
+    s.batch.min_size = s.batch.inbox_min_size = 10**9  # per-file test
     app = create_app(db_path=tmp_path / "t.db", settings=s, static_dir=None)
     client = TestClient(app)
     sid = int(client.post("/api/sessions", json={

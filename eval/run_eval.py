@@ -27,7 +27,7 @@ sys.path.insert(0, str(BACKEND / "tests" / "fixtures"))
 from generate_corpus import generate
 
 from swipesort.config import Settings
-from swipesort.db.models import File, Suggestion
+from swipesort.db.models import File, Folder, Suggestion
 from swipesort.main import create_app
 
 
@@ -47,15 +47,26 @@ class EvalReport(BaseModel):
     decide_ms_p50: float  # background file op + journal; reported, not gated
     decide_ms_p95: float
     misses: list[str]
+    # M4 (SPEC §4): where the file would actually go (descent destination)
+    path_correct: float = 0.0  # reached the right leaf
+    ancestor_inbox: float = 0.0  # stopped mid-tree at an ancestor of the right folder
+    dest_wrong: float = 0.0  # wrong leaf, or an inbox outside the right branch
+    reranked: int = 0
 
 
 def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = "fake",
-             workdir: Path | None = None, decide: bool = True, hard: bool = False) -> EvalReport:
+             workdir: Path | None = None, decide: bool = True,
+             settings_patch: dict[str, dict[str, object]] | None = None, hard: bool = False) -> EvalReport:
     tmp = Path(workdir or tempfile.mkdtemp(prefix="swipesort-eval-"))
     manifest = generate(tmp / "corpus", n=n, seed=seed, nested=nested, hard=hard)
     truth = {e.rel_path: e.category for e in manifest.entries}
+    anc_only = {e.rel_path: getattr(e, "ancestor_only", None) for e in manifest.entries}
     settings = Settings()
     settings.models.provider = provider
+    settings.batch.min_size = settings.batch.inbox_min_size = 10**9  # per-file accuracy
+    for section, values in (settings_patch or {}).items():
+        for k, v in values.items():
+            setattr(getattr(settings, section), k, v)
     app = create_app(db_path=tmp / "eval.db", settings=settings, static_dir=None)
     client = TestClient(app)
     t0 = time.perf_counter()
@@ -64,12 +75,17 @@ def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = 
         "output_root": str(tmp / "corpus" / "output")}).json()["id"]
     pipe = app.state.service.pipelines[sid]
     assert pipe.wait(1800), "pipeline timed out"
+    if pipe.llm is not None:  # LLM rerank runs after cards are READY; wait for it to drain
+        pipe.rerank_idle.wait(3600)
     pipeline_s = time.perf_counter() - t0
     if pipe.error:
         raise SystemExit(f"pipeline error: {pipe.error}")
 
     engine = app.state.service.engine
     hits1 = hits3 = 0
+    d_ok = d_anc = d_bad = 0
+    folder_rel: dict[int, str] = {}
+    out_root = (tmp / "corpus" / "output").resolve()
     tiers: Counter[str] = Counter()
     tier_hits: Counter[str] = Counter()
     bins: dict[int, list[int]] = {}
@@ -85,6 +101,25 @@ def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = 
                 tiers["none"] += 1
                 continue
             paths = [c["path"] for c in json.loads(sug.candidates_json)]
+            if sug.stop_folder_id is not None and sug.stop_folder_id not in folder_rel:
+                fo = db.get(Folder, sug.stop_folder_id)
+                folder_rel[sug.stop_folder_id] = (
+                    "" if fo is None or Path(fo.path) == out_root
+                    else Path(fo.path).relative_to(out_root).as_posix())
+            anc = anc_only.get(f.rel_path)
+            if sug.reached_leaf:
+                if paths and paths[0] == want and not anc:
+                    d_ok += 1
+                elif anc and paths and (paths[0] == anc or paths[0].startswith(anc + "/")):
+                    d_anc += 1  # only the ancestor is knowable: any leaf below it is fine
+                else:
+                    d_bad += 1
+            else:
+                stop = folder_rel.get(sug.stop_folder_id or -1, "")
+                if stop == "" or want == stop or want.startswith(stop + "/"):
+                    d_anc += 1
+                else:
+                    d_bad += 1
             ok1 = bool(paths) and paths[0] == want
             hits1 += ok1
             hits3 += want in paths[:3]
@@ -109,7 +144,9 @@ def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = 
             body = ({"action": "pick", "target_folder_id": target} if target is not None
                     else {"action": "trash"})
             t = time.perf_counter()
-            client.post(f"/api/cards/{c['id']}/decide", json=body)
+            r = client.post(f"/api/cards/{c['id']}/decide", json=body)
+            if r.status_code != 200:
+                raise RuntimeError(f"decide failed for {c['id']}: {r.text}")
             t2 = time.perf_counter()
             client.get(f"/api/sessions/{sid}/cards", params={"limit": 20})
             lat.append((time.perf_counter() - t2) * 1000)
@@ -130,6 +167,11 @@ def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = 
         next_cards_ms_p50=p50(lat), next_cards_ms_p95=p95(lat),
         decide_ms_p50=p50(dlat), decide_ms_p95=p95(dlat),
         misses=misses,
+        # correct-path rate over files whose leaf is determinable; for ancestor-only files the
+        # right outcome is the ancestor's inbox (counted in ancestor_inbox)
+        path_correct=d_ok / max(1, total - sum(1 for v in anc_only.values() if v)),
+        ancestor_inbox=d_anc / total, dest_wrong=d_bad / total,
+        reranked=pipe.reranked,
     )
 
 
@@ -148,6 +190,11 @@ def main() -> None:
         print("  miss:", m)
     ok = r.top1 >= 0.80 and r.top3 >= 0.95 and r.next_cards_ms_p95 < 100
     print("M1 acceptance:", "PASS" if ok else "FAIL")
+    if a.nested:
+        ok4 = r.path_correct >= 0.75
+        print(f"M4: path_correct={r.path_correct:.1%} ancestor_inbox={r.ancestor_inbox:.1%} "
+              f"wrong={r.dest_wrong:.1%} ->", "PASS" if ok4 else "FAIL")
+        ok = ok and ok4
     sys.exit(0 if ok else 1)
 
 

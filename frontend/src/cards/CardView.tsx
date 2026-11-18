@@ -1,6 +1,7 @@
 import { motion, type MotionValue } from 'framer-motion'
 import type { Card, Direction, Edge } from '../api/types'
 import { isHighlighted } from '../lib/duplicate'
+import { BatchCard } from './BatchCard'
 import { DuplicateCard } from './DuplicateCard'
 import { ManualCard } from './ManualCard'
 
@@ -14,10 +15,10 @@ const ARROW: Record<Direction, string> = { up: '↑', down: '↓', left: '←', 
 const ORDER: Direction[] = ['up', 'right', 'down', 'left']
 
 function tone(edge: Edge): string {
-  if (edge.action === 'trash') return 'border-red-300 text-red-700 dark:border-red-900 dark:text-red-300'
-  if (edge.action === 'flip' || edge.action === 'inbox')
+  if (edge.action === 'trash' || edge.action === 'trash_all') return 'border-red-300 text-red-700 dark:border-red-900 dark:text-red-300'
+  if (edge.action === 'flip' || edge.action === 'inbox' || edge.action === 'reject_all')
     return 'border-amber-300 text-amber-800 dark:border-amber-900 dark:text-amber-300'
-  if (edge.action === 'details') return 'border-sky-300 text-sky-800 dark:border-sky-900 dark:text-sky-300'
+  if (edge.action === 'details' || edge.action === 'review') return 'border-sky-300 text-sky-800 dark:border-sky-900 dark:text-sky-300'
   if (edge.action === 'defer') return 'border-stone-300 text-stone-600 dark:border-stone-700 dark:text-stone-400'
   return 'border-emerald-300 text-emerald-800 dark:border-emerald-900 dark:text-emerald-300'
 }
@@ -89,6 +90,8 @@ function CardBody({ card }: { card: Card }) {
   switch (card.kind) {
     case 'duplicate':
       return card.duplicate ? <DuplicateCard card={card} /> : <ManualCard card={card} />
+    case 'batch':
+      return card.batch ? <BatchCard card={card} /> : <ManualCard card={card} />
     default:
       return <ManualCard card={card} />
   }

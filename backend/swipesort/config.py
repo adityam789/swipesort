@@ -69,11 +69,50 @@ class Scoring(BaseModel):
     w_knn: float = 1.0
     w_meta: float = 0.6
     temperature: float = 0.08
+    # Softmax temperature depends on the embedding model's similarity spread (bge cosines sit
+    # in a compressed band). Tuned on the eval corpora: Confirm accuracy >= 95%.
+    temperature_by_provider: dict[str, float] = Field(
+        default_factory=lambda: {"local": 0.045, "ollama": 0.045})
     knn_k: int = 10
     meta_ext_share: float = 0.5  # s_meta = share*ext_prior + (1-share)*filename BM25
     bm25_k1: float = 1.2
     bm25_b: float = 0.75
     leaf_only: bool = True
+    # "none of these" option (see scoring.estimate_null_raw): quantile of how well existing
+    # files score against folders they don't belong to; offset shifts it (higher = stricter)
+    use_null: bool = True
+    null_quantile: float = 0.25  # tuned on the hard corpus (eval sweep): low = only no-fit files
+    null_offset: float = 0.0
+    null_min_samples: int = 1
+
+
+class Descent(BaseModel):
+    path_conf: str = "product"  # product | min  (SPEC §4; "centroid" method only)
+    method: str = "mass"  # mass (flat leaf probability mass) | centroid (SPEC §4 literal)
+
+
+class Batch(BaseModel):
+    min_size: int = 3  # SPEC §1 #4: "14 files -> Finance/Taxes/2025 at >= 95%, confirm all?"
+    threshold: float = 0.95
+    inbox_min_size: int = 3  # low-confidence files at the same stop node -> one inbox card
+
+
+class LLM(BaseModel):
+    provider: str = "ollama"  # ollama | llamacpp | none
+    # llama.cpp in-process (optional extra `llm-inprocess`): GGUF pulled from Hugging Face
+    llamacpp_repo: str = "Qwen/Qwen2.5-3B-Instruct-GGUF"
+    llamacpp_file: str = "qwen2.5-3b-instruct-q4_k_m.gguf"
+    llamacpp_ctx: int = 4096
+    rerank_top_k: int = 5
+    rerank_tiers: list[str] = Field(default_factory=lambda: ["confirm", "choices"])
+    eco_rerank_tiers: list[str] = Field(default_factory=lambda: ["choices"])
+    eco: bool = False  # smaller model + rerank only Choices (CPU-only machines)
+    eco_model: str = "qwen2.5:3b-instruct"
+    agree_boost: float = 0.05
+    disagree_cap: float = 0.89  # must stay below tiers.confirm
+    max_digest_chars: int = 1200
+    resolve_inbox: bool = True  # LLM picks among siblings when descent stops mid-tree
+    timeout_s: float = 60
 
 
 class Models(BaseModel):
@@ -121,6 +160,9 @@ class Server(BaseModel):
 class Settings(BaseModel):
     tiers: Tiers = Field(default_factory=Tiers)
     scoring: Scoring = Field(default_factory=Scoring)
+    descent: Descent = Field(default_factory=Descent)
+    batch: Batch = Field(default_factory=Batch)
+    llm: LLM = Field(default_factory=LLM)
     pipeline: Pipeline = Field(default_factory=Pipeline)
     dedup: Dedup = Field(default_factory=Dedup)
     proposals: Proposals = Field(default_factory=Proposals)

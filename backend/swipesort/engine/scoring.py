@@ -224,8 +224,13 @@ def score(
     folders: list[FolderIndex],
     placed: list[PlacedVec],
     cfg: Scoring,
+    null_raw: float | None = None,
 ) -> list[Scored]:
-    """Score `folders` (already filtered by candidates()) for one file; sorted desc by p."""
+    """Score `folders` (already filtered by candidates()) for one file; sorted desc by p.
+
+    `null_raw` adds a "none of these" option to the softmax (its mass is dropped, so the p's sum
+    to < 1). Softmax over siblings alone is purely relative: a file that fits nowhere would still
+    get p≈1 for the least-bad folder, and an only child always gets 1.0."""
     if not folders:
         return []
     vec = np.asarray(file_vec, dtype=np.float32)
@@ -256,7 +261,8 @@ def score(
             + cfg.w_meta * sig["meta"]
         )
         rows.append((f, raw, sig))
-    p = _softmax(np.array([r[1] for r in rows], dtype=np.float64), cfg.temperature)
+    raws = [r[1] for r in rows] + ([null_raw] if null_raw is not None else [])
+    p = _softmax(np.array(raws, dtype=np.float64), cfg.temperature)[: len(rows)]
     scored = [
         Scored(folder_id=f.folder_id, path=f.path, raw=raw, p=float(pi), signals=sig)
         for (f, raw, sig), pi in zip(rows, p, strict=True)
@@ -276,3 +282,31 @@ def tier(scored: list[Scored], cfg: Tiers) -> tuple[str, float]:
     if conf >= cfg.choices:
         return "choices", conf
     return "inbox", conf
+
+
+def estimate_null_raw(
+    index: list[FolderIndex],
+    samples: Sequence[tuple[npt.ArrayLike, list[str], str, int]],
+    placed: list[PlacedVec],
+    cfg: Scoring,
+) -> float | None:
+    """Data-driven "none of these" level for this session's tree and embedding model.
+
+    For files already in the output tree (vec, name tokens, ext, own folder id), take the best
+    raw score among folders they do NOT belong to: that's what "fits somewhere it doesn't
+    belong" looks like here. The `cfg.null_quantile` of those is the null option's raw score."""
+    cands = candidates(index, cfg.leaf_only)
+    by_id = {f.folder_id: f for f in index}
+    wrong: list[float] = []
+    for vec, tokens, ext, own in samples:
+        own_f = by_id.get(own)
+        others = [f for f in cands
+                  if f.folder_id != own and not (own_f is not None and f.path and
+                                                 own_f.path.startswith(f.path + "/"))]
+        if not others:
+            continue
+        sc = score(vec, tokens, ext, others, [pv for pv in placed if pv.folder_id != own], cfg)
+        wrong.append(max(x.raw for x in sc))
+    if not wrong:
+        return None
+    return float(np.quantile(np.array(wrong), cfg.null_quantile)) + cfg.null_offset

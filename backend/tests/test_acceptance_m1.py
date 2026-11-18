@@ -31,6 +31,7 @@ def test_m1_accuracy_and_latency(tmp_path: Path) -> None:
 def _client(tmp_path: Path, provider: Any = None) -> tuple[TestClient, Any]:
     s = Settings()
     s.models.provider = "fake"
+    s.batch.min_size = s.batch.inbox_min_size = 10**9  # per-file test
     app = create_app(db_path=tmp_path / "t.db", settings=s, provider=provider, static_dir=None)
     return TestClient(app), app
 
@@ -38,8 +39,11 @@ def _client(tmp_path: Path, provider: Any = None) -> tuple[TestClient, Any]:
 def _session(tmp_path: Path, client: TestClient, app: Any) -> int:
     inp, out = tmp_path / "in", tmp_path / "out"
     (out / "Finance" / "Invoices").mkdir(parents=True)
-    (out / "School").mkdir()
-    (out / "Finance" / "Invoices" / "a.txt").write_text("invoice amount due acme corp")
+    (out / "School" / "Lectures").mkdir(parents=True)
+    (out / "Finance" / "Invoices" / "a.txt").write_text("invoice amount due acme corp net 30")
+    (out / "Finance" / "Invoices" / "b.txt").write_text("invoice total due initech payment terms")
+    (out / "School" / "Lectures" / "l1.txt").write_text("lecture notes week one syllabus exam")
+    (out / "School" / "Lectures" / "l2.txt").write_text("lecture slides week two homework quiz")
     inp.mkdir()
     (inp / "mystery.txt").write_text("zebra quantum lullaby")
     (inp / "inv.txt").write_text("invoice amount due initech")
@@ -66,12 +70,16 @@ def test_ai_cards_have_data_driven_edges(tmp_path: Path) -> None:
 def test_inbox_then_undo_removes_inbox(tmp_path: Path) -> None:
     client, app = _client(tmp_path)
     sid = _session(tmp_path, client, app)
-    card = client.get(f"/api/sessions/{sid}/cards").json()[0]
+    cards = client.get(f"/api/sessions/{sid}/cards").json()
+    card = next(c for c in cards if c["file"]["name"] == "mystery.txt")
+    assert card["kind"] == "inbox"
     r = client.post(f"/api/cards/{card['id']}/decide", json={"action": "inbox"})
     assert r.status_code == 200, r.text
-    assert (tmp_path / "out" / "_Inbox" / card["file"]["name"]).exists()
+    # SPEC §4: the inbox lives at the level where descent stopped (card.destination)
+    inbox = tmp_path / "out" / card["destination"]
+    assert inbox.name == "_Inbox" and (inbox / card["file"]["name"]).exists()
     client.post(f"/api/sessions/{sid}/undo", json={"steps": 1})
-    assert not (tmp_path / "out" / "_Inbox").exists()
+    assert not inbox.exists()
     assert (tmp_path / "in" / card["file"]["name"]).exists()
     ids = [c["id"] for c in client.get(f"/api/sessions/{sid}/cards").json()]
     assert card["id"] in ids

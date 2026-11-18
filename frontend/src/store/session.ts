@@ -10,8 +10,10 @@ export const TREE_DEBOUNCE_MS = 300
 
 export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox' | 'kept'
 
-export function outcomeOf(action: Edge['action']): Outcome {
-  if (action === 'trash') return 'trashed'
+export function outcomeOf(action: Edge['action'], card?: Card): Outcome {
+  if (action === 'trash' || action === 'trash_all') return 'trashed'
+  if (action === 'confirm_all') return card?.batch?.kind === 'inbox' ? 'inbox' : 'moved'
+  if (action === 'review' || action === 'reject_all') return 'deferred' // members come back as individual cards
   if (action === 'defer') return 'deferred'
   if (action === 'inbox') return 'inbox'
   if (action === 'keep_both' || action === 'keep_this') return 'kept' // file continues to classification
@@ -23,10 +25,34 @@ export function resolvesDuplicate(card: Card, action: Edge['action']): boolean {
   return card.kind === 'duplicate' && (action === 'keep_this' || action === 'trash')
 }
 
+/** Batch actions that change files on disk (and are therefore one undo step). */
+export function isBatchMutation(card: Card, action: Edge['action']): boolean {
+  return !!card.batch && (action === 'confirm_all' || action === 'trash_all')
+}
+
+/** Batch actions that only hand the members back as individual cards (nothing to undo). */
+export function isBatchDismiss(card: Card, action: Edge['action']): boolean {
+  return !!card.batch && (action === 'review' || action === 'reject_all')
+}
+
+/** How many files one decision on this card affects. */
+export function weightOf(card: Card): number {
+  return card.batch ? card.batch.members.length : 1
+}
+
+function undoMessage(entry: UndoEntry): string {
+  if (!entry.card.batch) return `Undid: ${truncate(entry.card.file.name)}`
+  const n = entry.count
+  if (entry.outcome === 'trashed') return `Undid ${n} trashed ${n === 1 ? 'file' : 'files'}`
+  return `Undid ${n} ${n === 1 ? 'move' : 'moves'}`
+}
+
 export interface UndoEntry {
   key: number
   card: Card
   outcome: Outcome
+  /** Files affected (batch size; 1 for ordinary cards). */
+  count: number
   /** 1 when this decision counted toward `duplicatesResolved`. */
   dupResolved: number
   label: string
@@ -215,7 +241,7 @@ export const useSession = create<SessionState>()((set, get) => ({
       if (get().sessionId !== sessionId) return
       set((s) => {
         const known = new Set(s.queue.map((c) => c.id))
-        const candidates = cards.filter((c) => !known.has(c.id) && !s.inFlightIds.has(c.id))
+        const candidates = cards.filter((c) => !known.has(c.id) && !s.inFlightIds.has(c.id) && !isConsumed(s, c))
         let fresh = candidates.filter((c) => !s.deferredIds.has(c.id))
         let deferredIds = s.deferredIds
         // Deferred cards come back once everything else is done (the server orders them last).
@@ -272,20 +298,26 @@ export const useSession = create<SessionState>()((set, get) => ({
   decide: (card, edge) => {
     const state = get()
     if (state.sessionId === null || state.queue[0]?.id !== card.id) return
-    const outcome = outcomeOf(edge.action)
+    const outcome = outcomeOf(edge.action, card)
     const dupDelta = resolvesDuplicate(card, edge.action) ? 1 : 0
-    const entry: UndoEntry = { key: ++keySeq, card, outcome, dupResolved: dupDelta, label: edge.label }
+    const dismiss = isBatchDismiss(card, edge.action)
+    const count = dismiss ? 0 : weightOf(card)
+    const entry: UndoEntry = { key: ++keySeq, card, outcome, count, dupResolved: dupDelta, label: edge.label }
     const toastId = ++toastSeq
     const body: DecideIn = {
       action: edge.action,
       target_folder_id: edge.target_folder_id ?? null,
       latency_ms: Math.max(0, Date.now() - state.shownAt),
     }
+    if (card.batch) body.member_ids = card.batch.members.map((m) => m.id)
+    const memberIds = new Set(card.batch ? card.batch.members.map((m) => m.id) : [])
+    const consumed = isBatchMutation(card, edge.action)
     // Optimistic advance: the next card shows immediately.
     set((s) => ({
-      queue: s.queue.slice(1),
-      undoStack: [...s.undoStack, entry],
-      counts: { ...s.counts, [outcome]: s.counts[outcome] + 1 },
+      // Members of a confirmed/trashed batch must not reappear as individual cards.
+      queue: consumed ? s.queue.slice(1).filter((c) => !memberIds.has(c.file.id)) : s.queue.slice(1),
+      undoStack: dismiss ? s.undoStack : [...s.undoStack, entry],
+      counts: { ...s.counts, [outcome]: s.counts[outcome] + count },
       duplicatesResolved: s.duplicatesResolved + dupDelta,
       inFlightIds: new Set(s.inFlightIds).add(card.id),
       flippedIds: without(s.flippedIds, card.id),
@@ -297,19 +329,24 @@ export const useSession = create<SessionState>()((set, get) => ({
       toast: {
         id: toastId,
         kind: 'info',
-        message: `${truncate(card.file.name)} → ${edge.label}`,
-        undoable: true,
+        message: card.batch
+          ? `${card.batch.members.length} ${card.batch.members.length === 1 ? 'file' : 'files'} → ${edge.label}`
+          : `${truncate(card.file.name)} → ${edge.label}`,
+        undoable: !dismiss,
       },
     }))
-    if (get().queue.length < REFILL_BELOW) void get().fetchMore()
+    // After review/reject_all the members only exist server-side once the decision lands: refetch then.
+    if (!dismiss && get().queue.length < REFILL_BELOW) void get().fetchMore()
 
     void enqueue(() => api.decide(card.id, body)).then(
-      (res) =>
+      (res) => {
         set((s) => ({
           progress: res.progress,
           treeVersion: s.treeVersion + 1,
           inFlightIds: without(s.inFlightIds, card.id),
-        })),
+        }))
+        if (dismiss) void get().fetchMore() // members are now individual "m<fid>" cards
+      },
       (err) => {
         if (isBadRequest(err)) {
           // 400 "not ready or already decided": the card was removed server-side while on screen.
@@ -319,7 +356,7 @@ export const useSession = create<SessionState>()((set, get) => ({
             deferredIds.delete(card.id)
             return {
               undoStack: s.undoStack.filter((u) => u.key !== entry.key),
-              counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - 1) },
+              counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - count) },
               duplicatesResolved: Math.max(0, s.duplicatesResolved - dupDelta),
               inFlightIds: without(s.inFlightIds, card.id),
               deferredIds,
@@ -336,7 +373,7 @@ export const useSession = create<SessionState>()((set, get) => ({
           return {
             queue: [card, ...s.queue.filter((c) => c.id !== card.id)],
             undoStack: s.undoStack.filter((u) => u.key !== entry.key),
-            counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - 1) },
+            counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - count) },
             duplicatesResolved: Math.max(0, s.duplicatesResolved - dupDelta),
             inFlightIds: without(s.inFlightIds, card.id),
             deferredIds,
@@ -372,15 +409,16 @@ export const useSession = create<SessionState>()((set, get) => ({
     set((s) => {
       const deferredIds = new Set(s.deferredIds)
       deferredIds.delete(entry.card.id)
-      const stashed = s.stashedUpdates[entry.card.file.id]
+      const stashed = entry.card.batch ? undefined : s.stashedUpdates[entry.card.file.id]
       const back = stashed ?? entry.card
       deferredIds.delete(back.id)
-      const { [entry.card.file.id]: _used, ...stashedUpdates } = s.stashedUpdates
+      const stashedUpdates = { ...s.stashedUpdates }
+      if (!entry.card.batch) delete stashedUpdates[entry.card.file.id]
       return {
         stashedUpdates,
         queue: [back, ...s.queue.filter((c) => c.id !== entry.card.id && c.id !== back.id)],
         undoStack: s.undoStack.filter((u) => u.key !== entry.key),
-        counts: { ...s.counts, [entry.outcome]: Math.max(0, s.counts[entry.outcome] - 1) },
+        counts: { ...s.counts, [entry.outcome]: Math.max(0, s.counts[entry.outcome] - entry.count) },
         duplicatesResolved: Math.max(0, s.duplicatesResolved - entry.dupResolved),
         deferredIds,
         exhausted: false,
@@ -388,7 +426,7 @@ export const useSession = create<SessionState>()((set, get) => ({
         toast: {
           id: ++toastSeq,
           kind: 'info',
-          message: `Undid: ${truncate(entry.card.file.name)}`,
+          message: undoMessage(entry),
           undoable: false,
         },
       }
@@ -399,9 +437,9 @@ export const useSession = create<SessionState>()((set, get) => ({
     } catch (err) {
       // Put things back the way they were.
       set((s) => ({
-        queue: s.queue.filter((c) => c.id !== entry.card.id && c.file.id !== entry.card.file.id),
+        queue: s.queue.filter((c) => c.id !== entry.card.id && (entry.card.batch || c.file.id !== entry.card.file.id)),
         undoStack: [...s.undoStack, entry],
-        counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + 1 },
+        counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + entry.count },
         duplicatesResolved: s.duplicatesResolved + entry.dupResolved,
         deferredIds: entry.outcome === 'deferred' ? new Set(s.deferredIds).add(entry.card.id) : s.deferredIds,
         toast: { id: ++toastSeq, kind: 'error', message: `Undo failed: ${errMsg(err)}`, undoable: false },
@@ -448,17 +486,34 @@ function isBadRequest(e: unknown): boolean {
 function deferWithStash(s: SessionState, card: Card, outcome: Outcome): Set<string> {
   if (outcome !== 'deferred') return s.deferredIds
   const ids = new Set(s.deferredIds).add(card.id)
-  const stashed = s.stashedUpdates[card.file.id]
+  const stashed = card.batch ? undefined : s.stashedUpdates[card.file.id]
   if (stashed) ids.add(stashed.id)
   return ids
 }
 
 type QueueState = Pick<SessionState, 'queue' | 'deferredIds' | 'inFlightIds' | 'shownAt' | 'stashedUpdates' | 'undoStack'>
 
+/**
+ * Same card by id; or the same file (id changed, d12 -> m12). A batch card's `file` is just a
+ * representative member, so batches only ever match by id.
+ */
+function sameCard(a: Card, b: Card): boolean {
+  if (a.id === b.id) return true
+  return !a.batch && !b.batch && a.file.id === b.file.id
+}
+
+/** True for an individual card whose file was moved/trashed by a confirmed batch (until that is undone). */
+function isConsumed(s: Pick<SessionState, 'undoStack'>, card: Card): boolean {
+  if (card.batch) return false
+  return s.undoStack.some(
+    (u) => !!u.card.batch && u.outcome !== 'deferred' && u.card.batch.members.some((m) => m.id === card.file.id),
+  )
+}
+
 /** card_ready: append in server order (duplicates stay ahead of everything else), never at the head. */
 function cardReady(s: QueueState, card: Card): Partial<SessionState> {
-  if (s.deferredIds.has(card.id) || s.inFlightIds.has(card.id)) return {}
-  if (s.queue.some((c) => c.id === card.id || c.file.id === card.file.id)) return cardUpdated(s, card)
+  if (s.deferredIds.has(card.id) || s.inFlightIds.has(card.id) || isConsumed(s, card)) return {}
+  if (s.queue.some((c) => sameCard(c, card))) return cardUpdated(s, card)
   if (s.queue.length >= PREFETCH_LIMIT) return {} // fetchMore picks it up (in server order) when the queue drains
   if (s.queue.length === 0) return { queue: [card], shownAt: Date.now() }
   let at = s.queue.length
@@ -474,13 +529,14 @@ function cardReady(s: QueueState, card: Card): Partial<SessionState> {
 
 /** card_updated: replace by id, or by file id when the card id changed (d12 -> m12). Never the head. */
 function cardUpdated(s: QueueState, card: Card): Partial<SessionState> {
-  const idx = s.queue.findIndex((c) => c.id === card.id || c.file.id === card.file.id)
+  if (isConsumed(s, card)) return {}
+  const idx = s.queue.findIndex((c) => sameCard(c, card))
   if (idx > 0) {
     const queue = s.queue.slice()
     queue[idx] = card
     return { queue }
   }
-  const decided = s.undoStack.some((u) => u.card.file.id === card.file.id)
+  const decided = !card.batch && s.undoStack.some((u) => !u.card.batch && u.card.file.id === card.file.id)
   if (idx === 0 || decided) {
     // On screen (or decided and possibly coming back via undo): hold the update.
     return { stashedUpdates: { ...s.stashedUpdates, [card.file.id]: card } }

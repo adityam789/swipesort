@@ -13,6 +13,10 @@ Action = Literal[
     "keep_both",  # duplicate: dismiss the duplicate and continue to classification
     "keep_this",  # duplicate: trash the OTHER copy, continue classifying this one
     "details",  # client-side: show the side-by-side duplicate details panel
+    "confirm_all",  # batch: move every member to the batch target (one undo step)
+    "review",  # batch: dismiss the batch; members come back as individual cards
+    "reject_all",  # batch: members come back as individual Choices cards (top pick demoted)
+    "trash_all",  # batch: trash every member (one undo step)
 ]
 
 
@@ -91,10 +95,20 @@ class DuplicateInfo(BaseModel):
     reason: str  # e.g. "Identical to Finance/Invoices/x.pdf (100%)"
 
 
+class BatchInfo(BaseModel):
+    kind: Literal["move", "inbox"]  # high-confidence same target, or low-confidence -> _Inbox
+    target_folder_id: int
+    target_path: str  # relative to output_root, posix ("" = root)
+    members: list[FileInfo]  # the exact files the user is confirming (sent back on decide)
+    min_confidence: float
+
+
 class Card(BaseModel):
     id: str  # "m<file_id>" for manual cards in M0
     kind: Literal["manual", "confirm", "choices", "inbox", "duplicate", "batch", "proposal"]
     duplicate: DuplicateInfo | None = None
+    batch: BatchInfo | None = None
+    destination: str | None = None  # M4: where Right/accept puts it, e.g. "Work/PayPal/_Inbox"
     file: FileInfo
     reason: str = ""
     edges: dict[Direction, Edge]  # cards declare their edge targets as data
@@ -107,6 +121,7 @@ class Card(BaseModel):
 class DecideIn(BaseModel):
     action: Action
     target_folder_id: int | None = None
+    member_ids: list[int] | None = None  # batch cards: the members shown to the user
     latency_ms: int = 0
 
 

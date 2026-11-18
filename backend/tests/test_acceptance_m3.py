@@ -30,6 +30,7 @@ class SlowProvider(FakeProvider):
 def _settings() -> Settings:
     s = Settings()
     s.models.provider = "fake"
+    s.batch.min_size = s.batch.inbox_min_size = 10**9  # per-file test
     return s
 
 

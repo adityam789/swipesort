@@ -4,6 +4,7 @@ const CHIP: Record<string, string> = {
   confirm: 'bg-emerald-100 text-emerald-800 dark:bg-emerald-950 dark:text-emerald-300',
   choices: 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300',
   inbox: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
+  batch: 'bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300',
   manual: 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400',
 }
 
@@ -46,5 +47,26 @@ export function CandidateList({ candidates }: { candidates: Candidate[] }) {
         </li>
       ))}
     </ul>
+  )
+}
+
+/** The "why": a short sentence (LLM-written when available), shown prominently. */
+export function Reason({ reason }: { reason: string }) {
+  if (!reason) return null
+  return (
+    <p data-testid="reason" className="text-sm font-medium leading-snug text-stone-700 dark:text-stone-200">
+      {reason}
+    </p>
+  )
+}
+
+/** Where Right/accept will put the file, e.g. "Work/PayPal/_Inbox". */
+export function Destination({ destination }: { destination?: string | null }) {
+  if (!destination) return null
+  return (
+    <p data-testid="destination" className="break-all text-xs font-medium text-emerald-700 dark:text-emerald-300" title={destination}>
+      <span aria-hidden>→ </span>
+      {destination}
+    </p>
   )
 }

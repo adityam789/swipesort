@@ -1,6 +1,6 @@
 import { render, screen } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
-import type { Card, DuplicateInfo } from '../api/types'
+import type { BatchInfo, Card, DuplicateInfo, FileInfo } from '../api/types'
 import { CardView } from './CardView'
 
 const fetchPreview = vi.hoisted(() => vi.fn(() => Promise.resolve(null)))
@@ -114,6 +114,67 @@ describe('CardView', () => {
       const { container } = render(<CardView card={c} />)
       expect(container.querySelector('[data-edge="down"]')).toHaveAttribute('data-highlight', 'true')
       expect(container.querySelector('[data-edge="up"]')).not.toHaveAttribute('data-highlight')
+    })
+  })
+  describe('batch card', () => {
+    const f = (id: number): FileInfo => ({ id, name: `tax-${id}.pdf`, rel_path: `in/tax-${id}.pdf`, size: 10, mtime: 0, ext: '.pdf', is_bundle: false })
+    const batchInfo: BatchInfo = {
+      kind: 'move',
+      target_folder_id: 7,
+      target_path: 'Finance/Taxes/2025',
+      members: Array.from({ length: 14 }, (_, i) => f(i + 1)),
+      min_confidence: 0.953,
+    }
+    const batch: Card = {
+      ...card,
+      id: 'b1',
+      kind: 'batch',
+      batch: batchInfo,
+      file: batchInfo.members[0],
+      edges: {
+        right: { label: 'Confirm all', action: 'confirm_all' },
+        up: { label: 'Review', action: 'review' },
+        left: { label: 'Reject all', action: 'reject_all' },
+        down: { label: 'Trash all', action: 'trash_all' },
+      },
+    }
+
+    it('renders count, target, min confidence, members and thumbs', () => {
+      const { container } = render(<CardView card={batch} />)
+      expect(screen.getByTestId('batch-count')).toHaveTextContent('14')
+      expect(screen.getByTestId('batch-target')).toHaveTextContent('Finance/Taxes/2025')
+      expect(screen.getByTestId('batch-min-confidence')).toHaveTextContent('95%')
+      expect(screen.getAllByTestId('batch-member')).toHaveLength(14)
+      expect(screen.getByText('tax-14.pdf')).toBeInTheDocument()
+      expect(screen.getAllByTestId('batch-thumb')).toHaveLength(6)
+      expect(container.querySelector('img')).toHaveAttribute('src', '/api/files/1/preview')
+      expect(screen.getByText('Confirm all')).toBeInTheDocument()
+      expect(screen.getByText('Trash all')).toBeInTheDocument()
+    })
+
+    it('uses the inbox wording for inbox batches', () => {
+      const inbox: Card = { ...batch, batch: { ...batchInfo, kind: 'inbox', target_path: 'Work/_Inbox', members: batchInfo.members.slice(0, 7) } }
+      render(<CardView card={inbox} />)
+      expect(screen.getByTestId('batch-summary')).toHaveTextContent("Couldn't place these 7 files — send them to Work/_Inbox/?")
+    })
+  })
+
+  describe('reason and destination', () => {
+    it('shows the reason prominently and the destination', () => {
+      const c: Card = {
+        ...card,
+        kind: 'inbox',
+        reason: 'Probably somewhere in Work/PayPal/, unsure below that.',
+        destination: 'Work/PayPal/_Inbox',
+      }
+      render(<CardView card={c} />)
+      expect(screen.getByTestId('reason')).toHaveTextContent('Probably somewhere in Work/PayPal/, unsure below that.')
+      expect(screen.getByTestId('destination')).toHaveTextContent('Work/PayPal/_Inbox')
+    })
+
+    it('omits destination when absent', () => {
+      render(<CardView card={card} />)
+      expect(screen.queryByTestId('destination')).toBeNull()
     })
   })
 })

@@ -83,7 +83,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
     onUndo: () => void undo(),
     onDefer: () => {
       if (!card) return
-      const edge = Object.values(card.edges).find((e) => e?.action === 'defer')
+      const edge = Object.values(card.edges).find((e) => e?.action === 'defer' || e?.action === 'review')
       decide(card, edge ?? DEFER_EDGE)
     },
     onPreview: togglePreview,

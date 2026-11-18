@@ -12,6 +12,7 @@ from sqlmodel import col, select
 
 from swipesort.api.events import EventBus
 from swipesort.api.schemas import (
+    BatchInfo,
     Candidate,
     Card,
     DecideIn,
@@ -39,10 +40,13 @@ from swipesort.db.models import (
     Suggestion,
 )
 from swipesort.db.models import Session as SessionRow
+from swipesort.engine.batching import BatchItem, make_batches
+from swipesort.exec.errors import ExecError
 from swipesort.exec.executor import Executor
 from swipesort.exec.names import sanitize_name
 from swipesort.ml import get_provider
 from swipesort.ml.gateway import Provider
+from swipesort.ml.llm import LLM
 from swipesort.pipeline.scanner import list_dirs, scan
 from swipesort.pipeline.worker import SessionPipeline
 from swipesort.platform import get_platform
@@ -68,11 +72,12 @@ def _rel(path: Path, root: Path) -> str:
 
 class SessionService:
     def __init__(self, engine: Engine, settings: Settings, platform: Platform | None = None,
-                 provider: Provider | None = None):
+                 provider: Provider | None = None, llm: LLM | None = None):
         self.engine = engine
         self.settings = settings
         self.platform = platform or get_platform()
         self.provider = provider or get_provider(settings)
+        self.llm = llm
         self.pipelines: dict[int, SessionPipeline] = {}
         self.events = EventBus()
         self._executors: dict[int, Executor] = {}
@@ -171,7 +176,8 @@ class SessionService:
             db.commit()
             db.refresh(row)
             out_model = self._session_out(db, row)
-        pipe = SessionPipeline(self.engine, self.settings, self.platform, self.provider, sid)
+        pipe = SessionPipeline(self.engine, self.settings, self.platform, self.provider, sid,
+                               llm=self.llm)
         pipe.notify = lambda kind, ids, sid=sid: self._on_pipeline(sid, kind, ids)
         self.pipelines[sid] = pipe
         pipe.start()
@@ -312,6 +318,7 @@ class SessionService:
             if i < len(cands):
                 choice_edges[d] = pick(cands[i])
                 keys[str(i + 1)] = choice_edges[d]
+        destination: str | None = cands[0].path if cands else None
         if sug.tier == "confirm":
             edges: dict[str, Edge] = {
                 "right": pick(cands[0], "Move to "),
@@ -323,8 +330,11 @@ class SessionService:
         elif sug.tier == "choices":
             edges, flip = choice_edges, None
         else:
+            stop = db.get(Folder, sug.stop_folder_id) if sug.stop_folder_id else None
+            where = _rel(Path(stop.path), root) if stop is not None else ""
+            destination = f"{where}/{INBOX_NAME}" if where else INBOX_NAME
             edges = {
-                "right": Edge(label=f"Send to {INBOX_NAME}", action="inbox"),
+                "right": Edge(label=f"Send to {destination}", action="inbox"),
                 "left": Edge(label="Choose folder…", action="picker"),
                 "down": trash,
             }
@@ -335,6 +345,7 @@ class SessionService:
             id=f"m{f.id}", kind=sug.tier, file=info,
             reason=sug.reason, edges=edges, flip_edges=flip,
             confidence=sug.confidence, candidates=cands[:3], keys=keys,
+            destination=destination,
         )
 
     def _dup_suggestion(self, db: DB, fid: int) -> Suggestion | None:
@@ -420,20 +431,79 @@ class SessionService:
                     card = self._dup_card(f0, sug, db, row)
                     if card is not None:
                         dups[sug.file_id] = card
-            # SPEC §2.3: duplicates first (cheapest wins), then individual cards.
-            ordered = sorted(files, key=lambda f: (0 if f.id in dups else 1, *key(f)))[:limit]
             latest: dict[int, Suggestion] = {}
-            ids = [f.id for f in ordered]
-            for sug in db.exec(select(Suggestion).where(col(Suggestion.file_id).in_(ids),
-                                                        Suggestion.kind == "classify")
-                               .order_by(col(Suggestion.id))).all():
+            for sug in db.exec(select(Suggestion).where(
+                    Suggestion.session_id == sid, Suggestion.kind == "classify")
+                    .order_by(col(Suggestion.id))).all():
                 latest[sug.file_id] = sug  # ascending id -> last write wins = newest
             root = Path(row.output_root)
-            return [dups[f.id] if f.id in dups else
-                    self._card(f, sid, db, root, latest.get(f.id or -1)) for f in ordered]
+            by_id = {f.id: f for f in files}
+            ranked = sorted(files, key=key)
+            rank = {f.id: i for i, f in enumerate(ranked)}
+            # SPEC §2.3: duplicates first (cheapest wins), then batches, then individual cards.
+            items: list[BatchItem] = []
+            for f in ranked:
+                sg = latest.get(f.id or -1)
+                if (f.id is None or f.id in dups or f.status != FileStatus.ready or sg is None
+                        or not sg.batch_ok):
+                    continue
+                cands = json.loads(sg.candidates_json)
+                items.append(BatchItem(
+                    file_id=f.id, tier=sg.tier, confidence=sg.confidence,
+                    target_folder_id=cands[0]["folder_id"] if cands else None,
+                    stop_folder_id=sg.stop_folder_id, reached_leaf=sg.reached_leaf,
+                    rank=rank[f.id]))
+            batches: list[Card] = []
+            batched: set[int] = set()
+            for g in make_batches(items, self.settings.batch):
+                card = self._batch_card(g.kind, g.target_folder_id,
+                                        [by_id[i] for i in g.file_ids], g.min_confidence,
+                                        db, root)
+                if card is not None:
+                    batches.append(card)
+                    batched.update(g.file_ids)
+            singles = [f for f in ranked if f.id not in batched]
+            singles.sort(key=lambda f: 0 if f.id in dups else 1)  # stable: keeps card order
+            out: list[Card] = [dups[f.id] for f in singles if f.id in dups][:limit]
+            out += batches[: max(0, limit - len(out))]
+            rest = [f for f in singles if f.id not in dups][: max(0, limit - len(out))]
+            out += [self._card(f, sid, db, root, latest.get(f.id or -1)) for f in rest]
+            return out
 
-    def _inbox_folder(self, db: DB, sid: int, root: Path) -> Folder:
-        path = root / INBOX_NAME
+    def _batch_card(self, kind: str, target_id: int, members: list[File], min_conf: float,
+                    db: DB, root: Path) -> Card | None:
+        target = db.get(Folder, target_id)
+        if target is None or not members:
+            return None
+        rel = _rel(Path(target.path), root)
+        n = len(members)
+        infos = [FileInfo(id=m.id, name=Path(m.path).name, rel_path=m.rel_path, size=m.size,
+                          mtime=m.mtime, ext=m.ext, is_bundle=m.is_bundle)
+                 for m in members if m.id is not None]
+        if kind == "move":
+            dest = rel or "(output root)"
+            reason = f"{n} files → {dest} at ≥{round(min_conf * 100)}%. Confirm all?"
+            right = Edge(label=f"Move all {n} to {dest}", action="confirm_all")
+        else:
+            dest = f"{rel}/{INBOX_NAME}" if rel else INBOX_NAME
+            reason = f"Couldn't place these {n} files. Send them to {dest}/?"
+            right = Edge(label=f"Send all {n} to {dest}", action="confirm_all")
+        edges: dict[str, Edge] = {
+            "right": right,
+            "up": Edge(label="Review one by one", action="review"),
+            "left": Edge(label="Reject all", action="reject_all"),
+            "down": Edge(label=f"Trash all {n}", action="trash_all"),
+        }
+        return Card(
+            id=f"b{kind[0]}{target_id}", kind="batch", file=infos[0], reason=reason,
+            edges=edges, confidence=min_conf, destination=dest,
+            batch=BatchInfo(kind=kind, target_folder_id=target_id,
+                            target_path=rel, members=infos, min_confidence=min_conf),
+        )
+
+    def _inbox_folder(self, db: DB, sid: int, root: Path, parent: Path | None = None) -> Folder:
+        """`_Inbox/` under `parent` (default: output root), created lazily (SPEC §4)."""
+        path = (parent or root) / INBOX_NAME
         fo = db.exec(select(Folder).where(Folder.session_id == sid,
                                           Folder.path == str(path))).first()
         if fo is None:
@@ -443,6 +513,8 @@ class SessionService:
         return fo
 
     def decide(self, card_id: str, body: DecideIn) -> DecideOut:
+        if card_id[:1] == "b":
+            return self.decide_batch(card_id, body)
         if card_id[:1] not in ("m", "d") or not card_id[1:].isdigit():
             raise NotFound(f"card {card_id}")
         fid = int(card_id[1:])
@@ -485,7 +557,14 @@ class SessionService:
                 if pipe is not None:
                     pipe.on_placed(fid, folder.id, str(final))
             elif body.action == "inbox":
-                inbox = self._inbox_folder(db, sid, Path(row.output_root))
+                csug = db.exec(select(Suggestion).where(
+                    Suggestion.file_id == fid, Suggestion.kind == "classify")
+                    .order_by(col(Suggestion.id).desc())).first()
+                stop = (db.get(Folder, csug.stop_folder_id)
+                        if csug is not None and csug.stop_folder_id
+                        and not csug.reached_leaf else None)  # leaf-level -> root _Inbox
+                inbox = self._inbox_folder(db, sid, Path(row.output_root),
+                                           Path(stop.path) if stop is not None else None)
                 dec.target_folder_id = inbox.id
                 db.add(dec)
                 db.commit()  # release the write lock before the executor journals
@@ -539,6 +618,91 @@ class SessionService:
             self.publish(sid, "card_removed", card_id=f"d{removed_other}")
             self.publish(sid, "card_removed", card_id=f"m{removed_other}")
         self.publish(sid, "tree_changed" if final is not None else "progress")
+        return out
+
+    def decide_batch(self, card_id: str, body: DecideIn) -> DecideOut:
+        kind, raw = card_id[1:2], card_id[2:]
+        if kind not in ("m", "i") or not raw.isdigit():
+            raise NotFound(f"card {card_id}")
+        if not body.member_ids:
+            raise BadRequest("member_ids required for batch cards")
+        if body.action not in ("confirm_all", "trash_all", "review", "reject_all"):
+            raise BadRequest(f"unsupported batch action: {body.action}")
+        tid = int(raw)
+        with DB(self.engine) as db:
+            first = db.get(File, body.member_ids[0])
+            if first is None:
+                raise NotFound(f"file {body.member_ids[0]}")
+            sid = first.session_id
+        skipped: list[int] = []
+        moved_any = False
+        with self._lock(sid), DB(self.engine) as db:
+            row = self._session(db, sid)
+            root = Path(row.output_root)
+            members = [db.get(File, i) for i in body.member_ids]
+            if any(m is None or m.session_id != sid or m.status != FileStatus.ready
+                   for m in members):
+                raise BadRequest("batch members changed; refresh cards")
+            target = db.get(Folder, tid)
+            if target is None or target.session_id != sid:
+                raise NotFound(f"folder {tid}")
+            sugs = {m.id: db.exec(select(Suggestion).where(  # type: ignore[union-attr]
+                Suggestion.file_id == m.id, Suggestion.kind == "classify")  # type: ignore[union-attr]
+                .order_by(col(Suggestion.id).desc())).first() for m in members}
+            dec = Decision(session_id=sid, action=body.action, target_folder_id=tid,
+                           latency_ms=body.latency_ms,
+                           payload_json=json.dumps({
+                               "members": body.member_ids, "kind": kind,
+                               "tiers": {str(k): v.tier for k, v in sugs.items() if v}}))
+            db.add(dec)
+            db.commit()
+            db.refresh(dec)
+            assert dec.id is not None
+            ex = self._executor(row)
+            pipe = self.pipelines.get(sid)
+            if body.action in ("confirm_all", "trash_all"):
+                dest = target
+                if body.action == "confirm_all" and kind == "i":
+                    dest = self._inbox_folder(db, sid, root, Path(target.path))
+                for m in members:
+                    assert m is not None and m.id is not None
+                    try:
+                        if body.action == "trash_all":
+                            final = ex.trash(Path(m.path), decision_id=dec.id)
+                        else:
+                            final = ex.move(Path(m.path), Path(dest.path), decision_id=dec.id)
+                    except ExecError:
+                        skipped.append(m.id)  # locked etc.: retry later, never force
+                        continue
+                    moved_any = True
+                    m.path, m.status = str(final), FileStatus.decided
+                    db.add(m)
+                    if body.action == "confirm_all" and kind == "m" and dest.id is not None:
+                        db.add(IndexedFile(session_id=sid, folder_id=dest.id, path=str(final),
+                                           name=final.name, ext=m.ext,
+                                           content_hash=m.content_hash, file_id=m.id))
+                        if pipe is not None:
+                            pipe.on_placed(m.id, dest.id, str(final))
+                    db.commit()  # never hold a write lock while the executor journals
+                if not moved_any:
+                    dec.undone = True  # nothing happened: don't leave an empty undo step
+                    db.add(dec)
+            else:  # review / reject_all: members come back as individual cards
+                for sg in sugs.values():
+                    if sg is None:
+                        continue
+                    sg.batch_ok = False
+                    if body.action == "reject_all" and sg.tier == "confirm":
+                        sg.tier = "choices"  # top pick rejected: show the alternatives
+                        sg.confidence = min(sg.confidence, self.settings.tiers.confirm - 1e-6)
+                    db.add(sg)
+            db.commit()
+            out = DecideOut(decision_id=dec.id, final_path=None,
+                            progress=self._progress(db, sid))
+        if skipped:
+            self.publish(sid, "op_failed",
+                         message=f"{len(skipped)} file(s) were in use and were skipped")
+        self.publish(sid, "tree_changed" if moved_any else "progress")
         return out
 
     def undo(self, sid: int, steps: int = 1) -> UndoOut:
@@ -595,6 +759,16 @@ class SessionService:
                     if tgt is not None:
                         tgt.n_files = max(0, tgt.n_files - 1)
                         db.add(tgt)
+                if dec.action in ("review", "reject_all") and dec.payload_json:
+                    pl = json.loads(dec.payload_json)
+                    for mid in pl.get("members", []):
+                        sg = db.exec(select(Suggestion).where(
+                            Suggestion.file_id == mid, Suggestion.kind == "classify")
+                            .order_by(col(Suggestion.id).desc())).first()
+                        if sg is not None:
+                            sg.batch_ok = True
+                            sg.tier = pl.get("tiers", {}).get(str(mid), sg.tier)
+                            db.add(sg)
                 if dec.action in ("keep_both", "keep_this") and dec.suggestion_id is not None:
                     dsug = db.get(Suggestion, dec.suggestion_id)
                     if dsug is not None:

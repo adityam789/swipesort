@@ -31,10 +31,12 @@ from swipesort.db.models import (
     Suggestion,
 )
 from swipesort.db.models import Session as SessionRow
-from swipesort.engine import scoring
+from swipesort.engine import descent, scoring
 from swipesort.engine.dedup import DedupItem, find_duplicates
+from swipesort.ml import rerank as rr_mod
 from swipesort.ml.embed import embed_cached
 from swipesort.ml.gateway import ModelUnavailable, Provider
+from swipesort.ml.llm import LLM, get_llm
 from swipesort.pipeline.digest import build_digest, tokenize_name
 from swipesort.pipeline.extractors.base import ExtractResult
 from swipesort.pipeline.extractors.registry import extract
@@ -61,7 +63,8 @@ def profile_text(rel_path: str, description: str) -> str:
 
 class SessionPipeline:
     def __init__(self, engine: Engine, settings: Settings, platform: Platform,
-                 provider: Provider, session_id: int) -> None:
+                 provider: Provider, session_id: int, llm: LLM | None = None,
+                 use_llm: bool = True) -> None:
         self.engine = engine
         self.settings = settings
         self.platform = platform
@@ -77,6 +80,8 @@ class SessionPipeline:
         self._direct_names: dict[int, list[str]] = {}
         self._profiles: dict[int, Vec] = {}
         self._index: list[scoring.FolderIndex] = []
+        self._null_raw: float | None = None
+        self._null_samples: list[tuple[Vec, list[str], str, int]] = []
         self._placed: dict[str, scoring.PlacedVec] = {}  # key: indexed path
         self._vecs: dict[int, Vec] = {}  # input file id -> vec
         # invalidation (SPEC §7): suggestions carry the versions they were computed at
@@ -86,19 +91,38 @@ class SessionPipeline:
         self.notify: Callable[[str, list[int]], None] | None = None  # set by the service
         self._stop = threading.Event()
         self._rescore_wanted = threading.Event()
+        sc = settings.scoring
+        temp = sc.temperature_by_provider.get(settings.models.provider)
+        if temp is not None:  # per-embedding-model temperature (copy: never mutate shared cfg)
+            self.settings = settings = settings.model_copy(
+                update={"scoring": sc.model_copy(update={"temperature": temp})})
         self._thread = threading.Thread(target=self._run, name=f"pipeline-{session_id}",
                                         daemon=True)
         self._rescorer = threading.Thread(target=self._rescore_loop,
                                           name=f"rescore-{session_id}", daemon=True)
+        # LLM rerank (SPEC §3): runs ahead of the cursor on READY cards, never blocks them
+        # tests / offline (fake embeddings) never talk to a real LLM unless one is injected
+        self.llm: LLM | None = llm if llm is not None else (
+            get_llm(settings) if use_llm and settings.models.provider != "fake" else None)
+        self.llm_error = ""
+        self.reranked = 0
+        self._order_ids: list[int] = []
+        self._rerank_wanted = threading.Event()
+        self.rerank_idle = threading.Event()  # set when nothing is left to rerank
+        self._reranker = threading.Thread(target=self._rerank_loop,
+                                          name=f"rerank-{session_id}", daemon=True)
 
     # ------------------------------------------------------------------ lifecycle
     def start(self) -> None:
         self._thread.start()
         self._rescorer.start()
+        if self.llm is not None:
+            self._reranker.start()
 
     def stop(self) -> None:
         self._stop.set()
         self._rescore_wanted.set()
+        self._rerank_wanted.set()
 
     def _emit(self, kind: str, file_ids: list[int]) -> None:
         if self.notify is not None and (file_ids or kind == "progress"):
@@ -288,6 +312,8 @@ class SessionPipeline:
                 self._direct_vecs.setdefault(ix.folder_id, []).append(vecs[ih2])
                 self._direct_names.setdefault(ix.folder_id, []).append(ix.name)
                 self._placed[ix.path] = scoring.PlacedVec(folder_id=ix.folder_id, vec=vecs[ih2])
+                self._null_samples.append((vecs[ih2], tokenize_name(ix.name), ix.ext,
+                                           ix.folder_id))
             self._rebuild_index()
 
             # 6. lookahead scheduler (SPEC §7): embed + score inputs in priority order, in
@@ -299,6 +325,7 @@ class SessionPipeline:
             rank = {f.id: i for i, f in enumerate(order)}
             pending = sorted((f for f in order if f.id is not None),
                              key=lambda f: (0 if f.id in dup_ids else 1, rank[f.id]))
+            self._order_ids = [f.id for f in pending if f.id is not None]
             batch = max(1, self.settings.pipeline.embed_batch)
             small = max(1, min(batch, self.settings.pipeline.urgent_batch))
             target = self.settings.pipeline.lookahead + batch
@@ -339,6 +366,7 @@ class SessionPipeline:
                     ready.append(f.id)
                 db.commit()
                 self._emit("ready", ready)
+                self._rerank_wanted.set()
 
     # ------------------------------------------------------------------ dedup
     def _dedup(self, db: DB, order: list[File], indexed: list[IndexedFile],
@@ -383,22 +411,194 @@ class SessionPipeline:
     def _rebuild_index(self) -> None:
         self._index = scoring.build_folder_index(
             self._specs, self._direct_vecs, self._direct_names, self._profiles)
+        sc = self.settings.scoring
+        self._null_raw = (
+            scoring.estimate_null_raw(self._index, self._null_samples[:300],
+                                      list(self._placed.values()), sc)
+            if sc.use_null and len(self._null_samples) >= sc.null_min_samples else None)
 
     def _suggest(self, f: File, vec: Vec) -> Suggestion:
+        """Flat leaf scores give the alternatives (Choices); confidence-gated descent (SPEC §4)
+        gives the destination and the path confidence."""
         assert f.id is not None
+        tokens = tokenize_name(Path(f.path).name)
+        st = self.settings
         with self._lock:
-            cands = scoring.candidates(self._index, self.settings.scoring.leaf_only)
-            scored = scoring.score(vec, tokenize_name(Path(f.path).name), f.ext, cands,
-                                   list(self._placed.values()), self.settings.scoring)
-        tier, conf = scoring.tier(scored, self.settings.tiers)
-        top = scored[:5]
+            placed = list(self._placed.values())
+            cands = scoring.candidates(self._index, st.scoring.leaf_only)
+            flat = scoring.score(vec, tokens, f.ext, cands, placed, st.scoring, self._null_raw)
+            parents = {sp.folder_id: sp.parent_id for sp in self._specs}
+            root = next((sp.folder_id for sp in self._specs if sp.parent_id is None), None)
+            if root is None:
+                d = None
+            elif st.descent.method == "mass":
+                direct = {fi.folder_id for fi in self._index if fi.has_direct_files}
+                d = descent.descend_mass(flat, parents, root, st.tiers, st.descent, direct)
+            else:
+                d = descent.descend(vec, tokens, f.ext, self._index, parents, root, placed,
+                                    st.scoring, st.tiers, st.descent, set(), self._null_raw)
+        top = flat[:5]
+        if d is None or not flat:
+            tier, conf = scoring.tier(flat, st.tiers)
+            stop, reached, path_conf, reason = None, True, conf, _reason(top)
+        elif d.reached_leaf:
+            stop, reached, path_conf = d.stop_folder_id, True, d.path_conf
+            dest = next((sc for sc in flat if sc.folder_id == stop), None)
+            if dest is None:  # a non-leaf node that keeps files directly (leaf-only rule)
+                dest = scoring.Scored(folder_id=stop, path=self._folder_paths.get(stop, ""),
+                                      raw=0.0, p=path_conf, signals={})
+            top = [dest] + [sc for sc in flat if sc.folder_id != stop][:4]
+            # margin rule on the flat ranking still blocks Confirm for near-ties
+            margin_ok = len(flat) < 2 or flat[0].p - flat[1].p >= st.tiers.min_margin
+            conf = path_conf
+            if conf >= st.tiers.confirm and margin_ok and flat[0].folder_id == stop:
+                tier = "confirm"
+            elif conf >= st.tiers.choices:
+                tier = "choices"
+                conf = min(conf, st.tiers.confirm - 1e-6) if conf >= st.tiers.confirm else conf
+            else:
+                tier = "inbox"
+            reason = _reason(top)
+        else:
+            stop, reached, path_conf = d.stop_folder_id, False, d.path_conf
+            tier, conf = "inbox", min(path_conf, st.tiers.choices - 1e-6)
+            where = self._folder_paths.get(stop, "")
+            inside = [sc for sc in flat
+                      if where == "" or sc.path == where or sc.path.startswith(where + "/")]
+            top = (inside + [sc for sc in flat if sc not in inside])[:5]
+            reason = (f"Probably somewhere in {where}/, unsure below that." if where
+                      else "Couldn't place this file confidently.")
         return Suggestion(
             session_id=self.sid, file_id=f.id, kind="classify", confidence=conf, tier=tier,
-            candidates_json=json.dumps([{"folder_id": s.folder_id, "path": s.path, "p": s.p,
-                                         "signals": s.signals} for s in top]),
-            reason=_reason(top), model_version=self.provider.embed_model_id(),
+            candidates_json=json.dumps([{"folder_id": sc.folder_id, "path": sc.path, "p": sc.p,
+                                         "signals": sc.signals} for sc in top]),
+            reason=reason, model_version=self.provider.embed_model_id(),
             tree_version=self.tree_version, index_version=self.index_version,
+            stop_folder_id=stop, path_conf=path_conf, reached_leaf=reached,
         )
+
+    # ------------------------------------------------------------------ LLM rerank
+    def _rerank_loop(self) -> None:
+        while not self._stop.is_set():
+            self._rerank_wanted.wait(timeout=2.0)
+            self._rerank_wanted.clear()
+            if self._stop.is_set() or self.llm is None:
+                return
+            try:
+                self.rerank_idle.clear()
+                while not self._stop.is_set() and self._rerank_next():
+                    pass
+                if self.done.is_set():
+                    self.rerank_idle.set()
+            except ModelUnavailable as e:
+                log.warning("LLM unavailable, rerank disabled for this session: %s", e)
+                self.llm_error = str(e)
+                self.rerank_idle.set()
+                return
+            except Exception:
+                log.exception("rerank failed")
+
+    def _rerank_next(self) -> bool:
+        """Rerank the READY card closest to the user's cursor that still needs it."""
+        assert self.llm is not None
+        st = self.settings
+        with DB(self.engine) as db:
+            ready = {f.id for f in db.exec(select(File).where(
+                File.session_id == self.sid, File.status == FileStatus.ready)).all()}
+            target: Suggestion | None = None
+            for fid in self._order_ids:
+                if fid not in ready:
+                    continue
+                sug = db.exec(select(Suggestion).where(
+                    Suggestion.file_id == fid, Suggestion.kind == "classify")
+                    .order_by(col(Suggestion.id).desc())).first()
+                if sug is None or sug.llm_json:
+                    continue
+                if sug.reached_leaf and rr_mod.should_rerank(sug.tier, st.llm):
+                    target = sug
+                    break
+                if (not sug.reached_leaf and st.llm.resolve_inbox
+                        and len(self._inside_stop(sug)) >= 2):
+                    target = sug  # ambiguous mid-tree stop: let the LLM pick the sibling
+                    break
+            if target is None:
+                return False
+            f = db.get(File, target.file_id)
+            assert f is not None
+            ext = db.get(Extraction, f.content_hash) if f.content_hash else None
+            resolving = not target.reached_leaf
+            cands = (self._inside_stop(target) if resolving
+                     else json.loads(target.candidates_json))[: st.llm.rerank_top_k]
+            paths = [str(c["path"]) for c in cands]
+            sug_id = target.id
+        result = rr_mod.rerank(self.llm, Path(f.path).name, ext.digest_text if ext else "",
+                               paths, st.llm)  # slow: no DB transaction held
+        with DB(self.engine) as db:
+            sug = db.get(Suggestion, sug_id)
+            if sug is None:
+                return True
+            cur = json.loads(sug.candidates_json)
+            now = (self._inside_stop(sug) if resolving else cur)[: st.llm.rerank_top_k]
+            if [c["path"] for c in now] != paths:
+                return True  # rescored meanwhile; the next pass picks it up again
+            if resolving:
+                self._resolve_stop(sug, cur, paths, result)
+                db.add(sug)
+                db.commit()
+                self.reranked += 1
+                fid = sug.file_id
+                self._emit("updated", [fid])
+                return True
+            conf, tier, agrees = rr_mod.combine(paths[0], sug.confidence, sug.tier, result,
+                                                st.llm, st.tiers)
+            sug.llm_json = result.model_dump_json() if result else "{}"
+            sug.llm_agrees = agrees
+            if result is not None:
+                if not agrees:  # the LLM's pick leads the alternatives (Choices order)
+                    order = [result.choice, *result.alternates]
+                    cur.sort(key=lambda c: order.index(c["path"]) if c["path"] in order
+                             else len(order))
+                    sug.candidates_json = json.dumps(cur)
+                sug.confidence, sug.tier = conf, tier
+                if result.reason:
+                    sug.reason = result.reason
+            db.add(sug)
+            db.commit()
+            self.reranked += 1
+            fid = sug.file_id
+        self._emit("updated", [fid])
+        return True
+
+    def _inside_stop(self, sug: Suggestion) -> list[dict[str, object]]:
+        """Candidates (leaves) inside the descent stop node's subtree, best first."""
+        where = self._folder_paths.get(sug.stop_folder_id or -1, "")
+        out: list[dict[str, object]] = []
+        for c in json.loads(sug.candidates_json):
+            p = str(c["path"])
+            if where == "" or p == where or p.startswith(where + "/"):
+                out.append(c)
+        return out
+
+    def _resolve_stop(self, sug: Suggestion, cur: list[dict[str, object]], paths: list[str],
+                      result: rr_mod.RerankResult | None) -> None:
+        st = self.settings
+        sug.llm_json = result.model_dump_json() if result else "{}"
+        if result is None:
+            sug.llm_agrees = None
+            return
+        agrees = result.choice == paths[0]
+        sug.llm_agrees = agrees
+        order = [result.choice, *result.alternates]
+        cur.sort(key=lambda c: order.index(str(c["path"])) if c["path"] in order else len(order))
+        sug.candidates_json = json.dumps(cur)
+        if agrees:  # embeddings and LLM agree on the sibling: place it, as a Choices card
+            leaf = next(c for c in cur if c["path"] == result.choice)
+            sug.stop_folder_id = int(str(leaf["folder_id"]))
+            sug.reached_leaf = True
+            sug.tier = "choices"
+            sug.confidence = max(sug.confidence, st.tiers.choices)
+        if result.reason:
+            sug.reason = result.reason
 
     # ------------------------------------------------------------------ invalidation
     def request_rescore(self) -> None:
@@ -437,11 +637,17 @@ class SessionPipeline:
                 new = self._suggest(f, vec)
                 top_old = [c["folder_id"] for c in json.loads(old.candidates_json)[:3]]
                 top_new = [c["folder_id"] for c in json.loads(new.candidates_json)[:3]]
+                old.tree_version, old.index_version = new.tree_version, new.index_version
+                if old.llm_json and set(top_old) == set(top_new):
+                    db.add(old)  # SPEC §7: the LLM reruns only if the top 3 changed
+                    continue
                 if top_old != top_new or old.tier != new.tier:
                     changed.append(f.id)
                 old.candidates_json, old.confidence = new.candidates_json, new.confidence
                 old.tier, old.reason = new.tier, new.reason
-                old.tree_version, old.index_version = new.tree_version, new.index_version
+                old.stop_folder_id, old.path_conf = new.stop_folder_id, new.path_conf
+                old.reached_leaf = new.reached_leaf
+                old.llm_json, old.llm_agrees = "", None
                 db.add(old)
             db.commit()
         self._emit("updated", changed)

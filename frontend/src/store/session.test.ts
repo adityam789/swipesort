@@ -151,4 +151,111 @@ describe('session store', () => {
       expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m1'])
     })
   })
+  describe('batch cards', () => {
+    const batchCard = (members: number[], over: Partial<Card> = {}): Card => ({
+      ...mk(members[0]),
+      id: 'b1',
+      kind: 'batch',
+      batch: {
+        kind: 'move',
+        target_folder_id: 5,
+        target_path: 'Finance',
+        members: members.map((n) => mk(n).file),
+        min_confidence: 0.96,
+      },
+      edges: {
+        right: { label: 'Confirm all', action: 'confirm_all' },
+        up: { label: 'Review', action: 'review' },
+        left: { label: 'Reject all', action: 'reject_all' },
+        down: { label: 'Trash all', action: 'trash_all' },
+      },
+      ...over,
+    })
+    const ok = () => decide.mockResolvedValue({ decision_id: 1, final_path: null, progress })
+
+    it('sends member_ids exactly as shown and counts every member as moved', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2, 3]), mk(9)])
+      await useSession.getState().start(session)
+      ok()
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Confirm all', action: 'confirm_all' })
+      await vi.waitFor(() => expect(decide).toHaveBeenCalledWith('b1', expect.objectContaining({ action: 'confirm_all', member_ids: [1, 2, 3] })))
+      const s = useSession.getState()
+      expect(s.counts.moved).toBe(3)
+      expect(s.undoStack).toHaveLength(1)
+      expect(s.queue.map((c) => c.id)).toEqual(['m9'])
+    })
+
+    it('counts trash_all members as trashed and keeps them from reappearing', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2]), mk(9)])
+      await useSession.getState().start(session)
+      ok()
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Trash all', action: 'trash_all' })
+      await vi.waitFor(() => expect(useSession.getState().inFlightIds.size).toBe(0))
+      expect(useSession.getState().counts.trashed).toBe(2)
+      // stale member cards from the server / stream are ignored
+      getCards.mockResolvedValue([mk(1), mk(2), mk(9)])
+      await useSession.getState().fetchMore()
+      useSession.getState().applyEvent({ type: 'card_ready', card: mk(2) })
+      expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m9'])
+    })
+
+    it('accepts member m-cards after review without counting anything', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2])])
+      await useSession.getState().start(session)
+      ok()
+      getCards.mockResolvedValue([mk(1), mk(2)])
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Review', action: 'review' })
+      await vi.waitFor(() => expect(decide).toHaveBeenCalledWith('b1', expect.objectContaining({ action: 'review', member_ids: [1, 2] })))
+      await vi.waitFor(() => expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m1', 'm2']))
+      const s = useSession.getState()
+      expect(s.counts.moved + s.counts.trashed + s.counts.deferred).toBe(0)
+      expect(s.undoStack).toHaveLength(0)
+    })
+
+    it('accepts members that stream in after reject_all', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2])])
+      await useSession.getState().start(session)
+      ok()
+      getCards.mockResolvedValue([])
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Reject all', action: 'reject_all' })
+      await vi.waitFor(() => expect(useSession.getState().inFlightIds.size).toBe(0))
+      useSession.getState().applyEvent({ type: 'card_ready', card: mk(1) })
+      useSession.getState().applyEvent({ type: 'card_ready', card: mk(2) })
+      expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m1', 'm2'])
+    })
+
+    it('undo of a batch is one step and the toast pluralizes', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2, 3, 4]), mk(9)])
+      await useSession.getState().start(session)
+      ok()
+      undo.mockResolvedValue({ undone_ops: [1, 2, 3, 4], progress })
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Confirm all', action: 'confirm_all' })
+      await useSession.getState().undo()
+      expect(undo).toHaveBeenCalledTimes(1)
+      expect(undo).toHaveBeenCalledWith(1, { steps: 1 })
+      const s = useSession.getState()
+      expect(s.toast?.message).toBe('Undid 4 moves')
+      expect(s.counts.moved).toBe(0)
+      expect(s.queue[0].id).toBe('b1')
+    })
+
+    it('uses singular for a one-file batch', async () => {
+      getCards.mockResolvedValue([batchCard([1])])
+      await useSession.getState().start(session)
+      ok()
+      undo.mockResolvedValue({ undone_ops: [1], progress })
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Confirm all', action: 'confirm_all' })
+      await useSession.getState().undo()
+      expect(useSession.getState().toast?.message).toBe('Undid 1 move')
+    })
+
+    it('rolls back counts when a batch decision fails', async () => {
+      getCards.mockResolvedValue([batchCard([1, 2, 3])])
+      await useSession.getState().start(session)
+      decide.mockRejectedValue(new Error('boom'))
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Confirm all', action: 'confirm_all' })
+      await vi.waitFor(() => expect(useSession.getState().queue[0]?.id).toBe('b1'))
+      expect(useSession.getState().counts.moved).toBe(0)
+    })
+  })
 })

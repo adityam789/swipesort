@@ -30,6 +30,7 @@ dependencies = [
 [project.optional-dependencies]
 macos = ["pyobjc-framework-CoreServices>=10; sys_platform == 'darwin'"]
 windows = ["pywin32>=306; sys_platform == 'win32'"]
+llm-inprocess = ["llama-cpp-python>=0.3"]
 
 [project.scripts]
 swipesort = "swipesort.cli:app"

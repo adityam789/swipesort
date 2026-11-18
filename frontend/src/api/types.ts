@@ -15,6 +15,10 @@ export type Action =
   | 'keep_both' // duplicate: dismiss the duplicate and continue to classification
   | 'keep_this' // duplicate: trash the OTHER copy, continue classifying this one
   | 'details' // client-side only: show the side-by-side duplicate details panel
+  | 'confirm_all' // batch: move every member to the batch target (one undo step)
+  | 'review' // batch: dismiss the batch; members come back as individual cards
+  | 'reject_all' // batch: members come back as individual Choices cards
+  | 'trash_all' // batch: trash every member (one undo step)
 
 export interface SessionCreate {
   input_root: string
@@ -105,10 +109,21 @@ export interface DuplicateInfo {
   reason: string
 }
 
+export interface BatchInfo {
+  kind: 'move' | 'inbox' // high-confidence same target, or low-confidence -> _Inbox
+  target_folder_id: number
+  target_path: string // relative to output_root, posix ("" = root)
+  members: FileInfo[] // the exact files the user is confirming (sent back on decide)
+  min_confidence: number
+}
+
 export interface Card {
   id: string
   kind: CardKind
   duplicate?: DuplicateInfo | null
+  batch?: BatchInfo | null
+  /** Where Right/accept puts the file, e.g. "Work/PayPal/_Inbox". */
+  destination?: string | null
   file: FileInfo
   reason: string
   edges: Partial<Record<Direction, Edge>>
@@ -121,6 +136,8 @@ export interface Card {
 export interface DecideIn {
   action: Action
   target_folder_id?: number | null
+  /** Batch cards: the members shown to the user, exactly as displayed. */
+  member_ids?: number[] | null
   latency_ms?: number
 }
 

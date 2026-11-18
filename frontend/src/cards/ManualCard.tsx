@@ -1,6 +1,6 @@
 import type { Card } from '../api/types'
 import { formatDate, formatSize } from '../lib/format'
-import { CandidateList, ConfidenceMeter, KindChip } from './Insights'
+import { CandidateList, ConfidenceMeter, Destination, KindChip, Reason } from './Insights'
 import { Preview } from './Preview'
 
 export function ManualCard({ card }: { card: Card }) {
@@ -25,7 +25,8 @@ export function ManualCard({ card }: { card: Card }) {
         <p className="truncate text-xs text-stone-400 dark:text-stone-500" title={file.rel_path}>
           {file.rel_path}
         </p>
-        {card.reason && <p className="text-xs italic text-stone-500 dark:text-stone-400">{card.reason}</p>}
+        <Reason reason={card.reason} />
+        <Destination destination={card.destination} />
         <CandidateList candidates={card.candidates ?? []} />
       </div>
     </div>

@@ -39,6 +39,7 @@ def test_sort_50_by_hand_then_undo_all(
     before_in, before_out = snapshot(inp), snapshot(out)
     settings = Settings()
     settings.models.provider = "fake"
+    settings.batch.min_size = settings.batch.inbox_min_size = 10**9  # per-file test
     app = create_app(db_path=tmp_path / "s.db", settings=settings, static_dir=None)
     client = TestClient(app)
 

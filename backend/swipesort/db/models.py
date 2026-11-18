@@ -83,6 +83,7 @@ class Decision(SQLModel, table=True):
     ts: datetime = Field(default_factory=now)
     latency_ms: int = 0
     undone: bool = False
+    payload_json: str = ""  # batch decisions: {"members": [...], "tiers": {...}} for undo
 
 
 class Op(SQLModel, table=True):
@@ -144,6 +145,13 @@ class Suggestion(SQLModel, table=True):
     model_version: str = ""
     created_at: datetime = Field(default_factory=now)
     stale: bool = False
+    # M4: confidence-gated descent + LLM rerank
+    stop_folder_id: int | None = None  # descent stop node (inbox goes to <stop>/_Inbox)
+    path_conf: float = 0.0
+    reached_leaf: bool = True
+    llm_json: str = ""  # raw rerank output {choice, alternates, new_folder_suggestion, reason}
+    llm_agrees: bool | None = None
+    batch_ok: bool = True  # False after "review"/"reject_all": shown as an individual card
 
 
 class Features(SQLModel, table=True):
