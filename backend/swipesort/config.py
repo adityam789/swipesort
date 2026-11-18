@@ -71,7 +71,8 @@ class Scoring(BaseModel):
 
 
 class Models(BaseModel):
-    provider: str = "ollama"  # ollama | fake
+    provider: str = "local"  # local (fastembed + Ollama for LLM) | ollama | fake
+    local_embed: str = "BAAI/bge-small-en-v1.5"
     ollama_url: str = "http://127.0.0.1:11434"
     fake_dim: int = 512
     request_timeout_s: float = 60

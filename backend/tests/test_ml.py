@@ -14,6 +14,7 @@ from swipesort.db.session import make_engine
 from swipesort.ml import ModelUnavailable, get_provider
 from swipesort.ml.embed import embed_cached, pack, unpack
 from swipesort.ml.providers.fake import FakeProvider
+from swipesort.ml.providers.local import LocalProvider
 from swipesort.ml.providers.ollama import OllamaProvider
 
 
@@ -48,9 +49,32 @@ def test_fake_semantic_similarity() -> None:
     assert p.embed([""])[0] == [0.0] * 256
 
 
+def test_local_provider_normalizes_and_delegates(monkeypatch: pytest.MonkeyPatch) -> None:
+    class StubModel:
+        def embed(self, texts: list[str], batch_size: int) -> list[list[float]]:
+            return [[3.0, 4.0] for _ in texts]
+
+    p = LocalProvider(Settings())
+    monkeypatch.setattr(p, "_embedder", lambda: StubModel())  # no model download in tests
+    assert np.allclose(p.embed(["a", "b"]), [[0.6, 0.8], [0.6, 0.8]])
+    assert p.embed([]) == []
+    assert p.embed_model_id().startswith("local:")
+
+    class DownGen:
+        def caption(self, image: Path) -> str:
+            raise ModelUnavailable("down")
+
+    monkeypatch.setattr(p, "_gen", lambda: DownGen())
+    with pytest.raises(ModelUnavailable):
+        p.caption(Path("x.jpg"))
+
+
 def test_get_provider() -> None:
     assert isinstance(get_provider(fake_settings()), FakeProvider)
-    assert isinstance(get_provider(Settings()), OllamaProvider)
+    assert isinstance(get_provider(Settings()), LocalProvider)  # default; loads lazily
+    o = Settings()
+    o.models.provider = "ollama"
+    assert isinstance(get_provider(o), OllamaProvider)
     s = Settings()
     s.models.provider = "nope"
     with pytest.raises(ValueError):

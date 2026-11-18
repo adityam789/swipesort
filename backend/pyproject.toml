@@ -22,6 +22,7 @@ dependencies = [
   "pillow-heif>=1.8.1",
   "exifread>=3.5.1",
   "mutagen>=1.48.1",
+  "fastembed>=0.9.1",
 ]
 
 [project.optional-dependencies]
@@ -53,7 +54,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["tests/fixtures/"]
 
 [[tool.mypy.overrides]]
-module = ["send2trash.*", "xxhash.*", "blake3.*", "reportlab.*"]
+module = ["send2trash.*", "xxhash.*", "blake3.*", "reportlab.*", "fastembed.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

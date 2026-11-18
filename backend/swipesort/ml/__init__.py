@@ -14,8 +14,12 @@ def get_provider(settings: Settings) -> Provider:
         from swipesort.ml.providers.fake import FakeProvider
 
         return FakeProvider(settings)
+    if name == "local":
+        from swipesort.ml.providers.local import LocalProvider
+
+        return LocalProvider(settings)
     if name == "ollama":
         from swipesort.ml.providers.ollama import OllamaProvider
 
         return OllamaProvider(settings)
-    raise ValueError(f"Unknown model provider: {name!r} (expected 'ollama' or 'fake')")
+    raise ValueError(f"Unknown model provider: {name!r} (expected 'local', 'ollama' or 'fake')")

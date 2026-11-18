@@ -24,7 +24,7 @@ Read `SPEC.md` first. It is the source of truth for product behavior, architectu
 ## Stack & commands
 - Backend: Python 3.12 + `uv`. `cd backend && uv run pytest`, `uv run swipesort serve --dev`
 - Frontend: React + TS + Vite. `cd frontend && npm run dev` (proxies `/api` to the daemon)
-- Local models via Ollama. Tests must pass **without** Ollama by using a fake provider in `ml/providers/fake.py`.
+- Local models: embeddings in-process via `fastembed` (ONNX, Hugging Face `bge-small`; provider `local`, the default); LLM + VLM via Ollama (optional, degrades gracefully). Tests must pass **without** any model by using the fake provider in `ml/providers/fake.py`.
 
 ## Conventions
 - Type everything (Pydantic models for API, mypy-clean). Use async for IO and a process pool for CPU extraction.
