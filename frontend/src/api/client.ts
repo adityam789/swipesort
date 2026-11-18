@@ -71,17 +71,22 @@ interface RawPreview {
 }
 
 const PREVIEW_CACHE_MAX = 8
-const rawCache = new Map<number, Promise<RawPreview | null>>()
+const rawCache = new Map<string, Promise<RawPreview | null>>()
 
-function loadRaw(fileId: number): Promise<RawPreview | null> {
-  const hit = rawCache.get(fileId)
+/** A preview source is a file id (served by /api/files/{id}/preview) or an explicit URL. */
+export type PreviewSource = number | string
+const urlOf = (src: PreviewSource) => (typeof src === 'number' ? previewUrl(src) : src)
+
+function loadRaw(src: PreviewSource): Promise<RawPreview | null> {
+  const url = urlOf(src)
+  const hit = rawCache.get(url)
   if (hit) return hit
-  const p = fetch(previewUrl(fileId))
+  const p = fetch(url)
     .then(async (res) => (res.ok ? { type: res.headers.get('content-type') ?? '', blob: await res.blob() } : null))
     .catch(() => null)
-  rawCache.set(fileId, p)
+  rawCache.set(url, p)
   void p.then((v) => {
-    if (v === null) rawCache.delete(fileId)
+    if (v === null) rawCache.delete(url)
   })
   while (rawCache.size > PREVIEW_CACHE_MAX) {
     const oldest = rawCache.keys().next().value
@@ -92,13 +97,13 @@ function loadRaw(fileId: number): Promise<RawPreview | null> {
 }
 
 /** Warm the preview cache so the card renders instantly when it reaches the front. */
-export function prefetchPreview(fileId: number): void {
-  void loadRaw(fileId)
+export function prefetchPreview(src: PreviewSource): void {
+  void loadRaw(src)
 }
 
 /** Fetch a preview (cached); image/* becomes a fresh blob URL (caller revokes), text/* becomes a string. */
-export async function fetchPreview(fileId: number, signal?: AbortSignal): Promise<PreviewData | null> {
-  const raw = await loadRaw(fileId)
+export async function fetchPreview(src: PreviewSource, signal?: AbortSignal): Promise<PreviewData | null> {
+  const raw = await loadRaw(src)
   if (!raw || signal?.aborted) return null
   if (raw.type.startsWith('image/')) return { kind: 'image', url: URL.createObjectURL(raw.blob) }
   if (raw.type.startsWith('text/')) return { kind: 'text', text: await raw.blob.text() }

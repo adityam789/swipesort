@@ -15,6 +15,7 @@ from swipesort.api.schemas import (
     Card,
     DecideIn,
     DecideOut,
+    DuplicateInfo,
     Edge,
     FileInfo,
     FolderOut,
@@ -289,6 +290,68 @@ class SessionService:
             confidence=sug.confidence, candidates=cands[:3], keys=keys,
         )
 
+    def _dup_suggestion(self, db: DB, fid: int) -> Suggestion | None:
+        return db.exec(select(Suggestion).where(
+            Suggestion.file_id == fid, Suggestion.kind == "duplicate",
+            col(Suggestion.stale).is_(False)).order_by(col(Suggestion.id).desc())).first()
+
+    def _resolve_other(self, db: DB, key: str, row: SessionRow
+                       ) -> tuple[Path, str, str, str] | None:
+        """(current path, rel path, side, preview url) of a duplicate's other copy, or None if
+        it no longer exists / was trashed (lazy invalidation, SPEC §5)."""
+        kind, _, raw = key.partition(":")
+        out_root, in_root = Path(row.output_root), Path(row.input_root)
+        if kind == "f":
+            other = db.get(File, int(raw))
+            if other is None:
+                return None
+            path, url = Path(other.path), f"/api/files/{other.id}/preview"
+        elif kind == "ix":
+            ixo = db.get(IndexedFile, int(raw))
+            if ixo is None:
+                return None
+            path, url = Path(ixo.path), f"/api/indexed/{ixo.id}/preview"
+        else:
+            return None
+        if not path.exists() or (out_root / ".swipesort") in path.parents:
+            return None
+        if path.is_relative_to(out_root) and not (
+                in_root != out_root and path.is_relative_to(in_root)):
+            return path, _rel(path, out_root), "output", url
+        return path, _rel(path, in_root), "input", url
+
+    def _dup_card(self, f: File, sug: Suggestion, db: DB, row: SessionRow) -> Card | None:
+        assert f.id is not None
+        data = json.loads(sug.candidates_json)
+        other = self._resolve_other(db, data["other"], row)
+        if other is None:
+            return None
+        opath, orel, oside, ourl = other
+        keep = data["keep"]
+        recommend = "keep_this" if keep == f"f:{f.id}" else "trash_this"
+        try:
+            ost = opath.stat()
+            osize, omtime = ost.st_size, ost.st_mtime
+        except OSError:
+            osize, omtime = 0, 0.0
+        dup = DuplicateInfo(
+            relation=data["relation"], similarity=data["similarity"], other_name=opath.name,
+            other_rel_path=orel, other_side=oside,
+            other_size=osize, other_mtime=omtime, other_preview_url=ourl,
+            recommend=recommend,
+            reason=sug.reason,
+        )
+        edges: dict[str, Edge] = {
+            "right": Edge(label="Keep both", action="keep_both"),
+            "up": Edge(label="Keep this, trash the other", action="keep_this"),
+            "left": Edge(label="Details", action="details"),
+            "down": Edge(label="Trash this one", action="trash"),
+        }
+        info = FileInfo(id=f.id, name=Path(f.path).name, rel_path=f.rel_path, size=f.size,
+                        mtime=f.mtime, ext=f.ext, is_bundle=f.is_bundle)
+        return Card(id=f"d{f.id}", kind="duplicate", file=info, reason=sug.reason,
+                    edges=edges, confidence=data["similarity"], duplicate=dup)
+
     def cards(self, sid: int, limit: int = 20) -> list[Card]:
         with DB(self.engine) as db:
             row = self._session(db, sid)
@@ -301,14 +364,26 @@ class SessionService:
                 return (1 if f.status == FileStatus.skipped else 0, str(p.parent).casefold(),
                         p.name.casefold())
 
-            ordered = sorted(files, key=key)[:limit]
+            dups: dict[int, Card] = {}
+            for sug in db.exec(select(Suggestion).where(
+                    Suggestion.session_id == sid, Suggestion.kind == "duplicate",
+                    col(Suggestion.stale).is_(False))).all():
+                f0 = next((f for f in files if f.id == sug.file_id), None)
+                if f0 is not None and f0.status == FileStatus.ready:
+                    card = self._dup_card(f0, sug, db, row)
+                    if card is not None:
+                        dups[sug.file_id] = card
+            # SPEC §2.3: duplicates first (cheapest wins), then individual cards.
+            ordered = sorted(files, key=lambda f: (0 if f.id in dups else 1, *key(f)))[:limit]
             latest: dict[int, Suggestion] = {}
             ids = [f.id for f in ordered]
-            for sug in db.exec(select(Suggestion).where(col(Suggestion.file_id).in_(ids))
+            for sug in db.exec(select(Suggestion).where(col(Suggestion.file_id).in_(ids),
+                                                        Suggestion.kind == "classify")
                                .order_by(col(Suggestion.id))).all():
                 latest[sug.file_id] = sug  # ascending id -> last write wins = newest
             root = Path(row.output_root)
-            return [self._card(f, sid, db, root, latest.get(f.id or -1)) for f in ordered]
+            return [dups[f.id] if f.id in dups else
+                    self._card(f, sid, db, root, latest.get(f.id or -1)) for f in ordered]
 
     def _inbox_folder(self, db: DB, sid: int, root: Path) -> Folder:
         path = root / INBOX_NAME
@@ -321,7 +396,7 @@ class SessionService:
         return fo
 
     def decide(self, card_id: str, body: DecideIn) -> DecideOut:
-        if not card_id.startswith("m") or not card_id[1:].isdigit():
+        if card_id[:1] not in ("m", "d") or not card_id[1:].isdigit():
             raise NotFound(f"card {card_id}")
         fid = int(card_id[1:])
         with DB(self.engine) as db:
@@ -371,6 +446,34 @@ class SessionService:
             elif body.action == "trash":
                 final = ex.trash(Path(f.path), decision_id=dec.id)
                 f.status = FileStatus.decided
+            elif body.action in ("keep_both", "keep_this"):
+                sug = self._dup_suggestion(db, fid)
+                if sug is None:
+                    db.delete(dec)
+                    db.commit()
+                    raise BadRequest("no pending duplicate for this card")
+                dec.suggestion_id = sug.id
+                sug.stale = True
+                db.add(sug)
+                db.add(dec)
+                db.commit()
+                if body.action == "keep_this":
+                    other = self._resolve_other(db, json.loads(sug.candidates_json)["other"], row)
+                    if other is not None:
+                        trashed = ex.trash(other[0], decision_id=dec.id)
+                        okey = json.loads(sug.candidates_json)["other"]
+                        kind, _, raw = okey.partition(":")
+                        if kind == "f":
+                            of = db.get(File, int(raw))
+                            if of is not None:
+                                of.path, of.status = str(trashed), FileStatus.decided
+                                db.add(of)
+                        else:
+                            oix = db.get(IndexedFile, int(raw))
+                            if oix is not None:
+                                oix.path = str(trashed)
+                                db.add(oix)
+                # this file stays READY and continues to classification
             elif body.action == "defer":
                 f.status = FileStatus.skipped
             else:
@@ -403,6 +506,12 @@ class SessionService:
                     ids = ex.undo(1)
                     undone_ops.extend(ids)
                     for op in db.exec(select(Op).where(col(Op.id).in_(ids))).all():
+                        if op.type == OpType.trash:
+                            for oix in db.exec(select(IndexedFile).where(
+                                    IndexedFile.session_id == sid,
+                                    IndexedFile.path == op.dst)).all():
+                                oix.path = op.src
+                                db.add(oix)
                         if op.type in (OpType.move, OpType.trash):
                             f = db.exec(select(File).where(
                                 File.session_id == sid, File.path == op.dst)).first()
@@ -432,6 +541,11 @@ class SessionService:
                     if tgt is not None:
                         tgt.n_files = max(0, tgt.n_files - 1)
                         db.add(tgt)
+                if dec.action in ("keep_both", "keep_this") and dec.suggestion_id is not None:
+                    dsug = db.get(Suggestion, dec.suggestion_id)
+                    if dsug is not None:
+                        dsug.stale = False
+                        db.add(dsug)
                 if dec.action == "defer" and dec.file_id is not None:
                     f = db.get(File, dec.file_id)
                     if f is not None and f.status == FileStatus.skipped:
@@ -491,6 +605,13 @@ class SessionService:
             if top is None:
                 raise NotFound("output root folder")
             return top
+
+    def indexed_path(self, ixid: int) -> Path:
+        with DB(self.engine) as db:
+            ix = db.get(IndexedFile, ixid)
+            if ix is None:
+                raise NotFound(f"indexed file {ixid}")
+            return Path(ix.path)
 
     def file_path(self, fid: int) -> Path:
         with DB(self.engine) as db:

@@ -10,6 +10,9 @@ Direction = Literal["right", "up", "left", "down"]
 Action = Literal[
     "pick", "trash", "defer", "picker", "accept", "choose_1", "choose_2", "choose_3", "inbox",
     "flip",  # client-side: swap card.edges for card.flip_edges (Confirm "Not this")
+    "keep_both",  # duplicate: dismiss the duplicate and continue to classification
+    "keep_this",  # duplicate: trash the OTHER copy, continue classifying this one
+    "details",  # client-side: show the side-by-side duplicate details panel
 ]
 
 
@@ -75,9 +78,23 @@ class Candidate(BaseModel):
     p: float
 
 
+class DuplicateInfo(BaseModel):
+    relation: Literal["exact", "near_image", "near_text", "version"]
+    similarity: float  # 0..1
+    other_name: str
+    other_rel_path: str  # relative to its root, posix
+    other_side: Literal["input", "output"]
+    other_size: int
+    other_mtime: float
+    other_preview_url: str  # GET-able preview of the other copy
+    recommend: Literal["keep_this", "trash_this", "keep_both"]
+    reason: str  # e.g. "Identical to Finance/Invoices/x.pdf (100%)"
+
+
 class Card(BaseModel):
     id: str  # "m<file_id>" for manual cards in M0
     kind: Literal["manual", "confirm", "choices", "inbox", "duplicate", "batch", "proposal"]
+    duplicate: DuplicateInfo | None = None
     file: FileInfo
     reason: str = ""
     edges: dict[Direction, Edge]  # cards declare their edge targets as data

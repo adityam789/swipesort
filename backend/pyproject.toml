@@ -23,6 +23,8 @@ dependencies = [
   "exifread>=3.5.1",
   "mutagen>=1.48.1",
   "fastembed>=0.9.1",
+  "imagehash>=4.3.2",
+  "datasketch>=2.0.0",
 ]
 
 [project.optional-dependencies]

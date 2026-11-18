@@ -2,7 +2,7 @@ import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
 import { act, render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { beforeEach, describe, expect, it, vi } from 'vitest'
-import type { Card, Edge, Progress, SessionOut } from '../api/types'
+import type { Card, DuplicateInfo, Edge, Progress, SessionOut } from '../api/types'
 
 vi.mock('../api/client', () => ({
   api: {
@@ -128,5 +128,96 @@ describe('Sort page', () => {
     expect(await screen.findByText(/Analyzing files/)).toBeInTheDocument()
     await act(() => useSession.getState().refresh())
     expect(await screen.findByText('All sorted')).toBeInTheDocument()
+  })
+
+  describe('duplicate cards', () => {
+    const info: DuplicateInfo = {
+      relation: 'exact',
+      similarity: 1,
+      other_name: 'twin.txt',
+      other_rel_path: 'Docs/twin.txt',
+      other_side: 'output',
+      other_size: 2048,
+      other_mtime: 1_700_000_000,
+      other_preview_url: '/api/files/77/preview',
+      recommend: 'trash_this',
+      reason: 'Identical to Docs/twin.txt (100%)',
+    }
+    const dupCard = (n: number): Card =>
+      mk(n, {
+        id: `d${n}`,
+        kind: 'duplicate',
+        duplicate: info,
+        edges: {
+          right: { label: 'Keep both', action: 'keep_both' },
+          up: { label: 'Keep this, trash the other', action: 'keep_this' },
+          left: { label: 'Details', action: 'details' },
+          down: { label: 'Trash this one', action: 'trash' },
+        },
+      })
+
+    it('Details opens the compare panel with no network call; Esc closes it', async () => {
+      getCards.mockResolvedValue([dupCard(1), mk(2)])
+      await useSession.getState().start(sess(prog({})))
+      getCards.mockClear()
+      renderSort()
+      const user = userEvent.setup()
+      await user.click(await screen.findByText('Details'))
+      const panel = await screen.findByTestId('duplicate-panel')
+      expect(panel).toHaveTextContent('Docs/twin.txt')
+      expect(panel).toHaveTextContent('f1.txt')
+      expect(panel).toHaveTextContent('100%')
+      expect(panel).toHaveTextContent('Identical to Docs/twin.txt')
+      expect(decide).not.toHaveBeenCalled()
+      expect(getCards).not.toHaveBeenCalled()
+      expect(useSession.getState().undoStack).toHaveLength(0)
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByTestId('duplicate-panel')).toBeNull())
+      expect(decide).not.toHaveBeenCalled()
+    })
+
+    it('keep_both posts, and the same file coming back as an "m<id>" card is accepted', async () => {
+      getCards.mockResolvedValue([dupCard(1), mk(2)])
+      await useSession.getState().start(sess(prog({})))
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Keep both', action: 'keep_both' })
+      await waitFor(() => expect(useSession.getState().inFlightIds.size).toBe(0))
+      expect(decide).toHaveBeenCalledWith('d1', expect.objectContaining({ action: 'keep_both' }))
+      expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m2'])
+      // Server re-queues file 1 as a classification card with a different card id.
+      getCards.mockResolvedValue([mk(2), mk(1)])
+      await act(() => useSession.getState().fetchMore())
+      expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m2', 'm1'])
+      expect(useSession.getState().queue[1].file.id).toBe(1)
+    })
+
+    it('counts duplicates resolved (keep_this + trash) separately in the summary; keep_both does not count', async () => {
+      getCards.mockResolvedValue([dupCard(1), dupCard(2), dupCard(3)])
+      getSession.mockResolvedValue(sess(prog({ scanned: 3, processed: 3, decided: 3, remaining: 0 })))
+      await useSession.getState().start(sess(prog({ scanned: 3, processed: 3 })))
+      const s = () => useSession.getState()
+      s().decide(s().queue[0], { label: 'Keep this, trash the other', action: 'keep_this' })
+      s().decide(s().queue[0], { label: 'Trash this one', action: 'trash' })
+      s().decide(s().queue[0], { label: 'Keep both', action: 'keep_both' })
+      expect(s().duplicatesResolved).toBe(2)
+      await waitFor(() => expect(s().inFlightIds.size).toBe(0))
+      getCards.mockResolvedValue([])
+      await act(() => s().fetchMore())
+      renderSort()
+      const label = await screen.findByText('Duplicates resolved')
+      expect(label.previousElementSibling).toHaveTextContent('2')
+    })
+
+    it('undo of keep_both restores the duplicate card at the front', async () => {
+      getCards.mockResolvedValue([dupCard(1), mk(2)])
+      vi.mocked(api.undo).mockResolvedValue({ undone_ops: [1], progress: prog({}) })
+      await useSession.getState().start(sess(prog({})))
+      useSession.getState().decide(useSession.getState().queue[0], { label: 'Keep both', action: 'keep_both' })
+      await waitFor(() => expect(useSession.getState().inFlightIds.size).toBe(0))
+      await act(() => useSession.getState().undo())
+      expect(useSession.getState().queue[0].id).toBe('d1')
+      getCards.mockResolvedValue([dupCard(1), mk(2)]) // server refetch after undo must not be filtered out
+      await act(() => useSession.getState().fetchMore())
+      expect(useSession.getState().queue.map((c) => c.id)).toEqual(['d1', 'm2'])
+    })
   })
 })

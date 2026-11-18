@@ -3,6 +3,7 @@ import { useEffect, useState } from 'react'
 import { api, prefetchPreview } from '../api/client'
 import type { Direction, Edge, FolderOut } from '../api/types'
 import { CardView } from '../cards/CardView'
+import { DuplicatePanel } from '../cards/DuplicatePanel'
 import { Preview } from '../cards/Preview'
 import { FolderPicker } from '../components/FolderPicker'
 import { ToastHost } from '../components/Toast'
@@ -28,7 +29,8 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
   const lastFolder = useSession((s) => s.lastFolder)
   const treeVersion = useSession((s) => s.treeVersion)
   const flippedIds = useSession((s) => s.flippedIds)
-  const { decide, flip, undo, pickFolder, openPicker, closePicker, togglePreview, refresh } = useSession.getState()
+  const detailsOpen = useSession((s) => s.detailsOpen)
+  const { decide, flip, undo, pickFolder, openPicker, closePicker, togglePreview, refresh, openDetails, closeDetails } = useSession.getState()
   const [drawer, setDrawer] = useState<Drawer>(null)
 
   const card = queue[0]
@@ -61,6 +63,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
     if (!card) return
     if (edge.action === 'picker') openPicker()
     else if (edge.action === 'flip') flip(card.id)
+    else if (edge.action === 'details') openDetails() // client-side only, no POST
     else decide(card, edge)
   }
   const fling = (dir: Direction) => {
@@ -70,7 +73,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
 
   const { bind, x, y, rotate, aimed } = useFling({
     edges: card?.edges ?? {},
-    enabled: !!card && !pickerOpen,
+    enabled: !!card && !pickerOpen && !detailsOpen,
     onFling: fling,
     keys: card?.keys,
     onKey: act,
@@ -168,6 +171,8 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
           </div>
         </div>
       )}
+
+      {detailsOpen && card?.duplicate && <DuplicatePanel card={card} onClose={closeDetails} />}
 
       {pickerOpen && (
         <FolderPicker folders={folders} initialId={lastFolder?.id} onClose={closePicker} onCreate={createFolder} onPick={pickFolder} />

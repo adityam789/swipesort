@@ -108,11 +108,24 @@ def create_folder(body: FolderCreate, request: Request) -> FolderOut:
 
 @router.get("/files/{fid}/preview")
 def preview(fid: int, request: Request) -> Response:
-    s = svc(request)
     try:
-        path = s.file_path(fid)
+        path = svc(request).file_path(fid)
     except Exception as e:
         raise _guard(e) from e
+    return _preview(path, f"f{fid}", request)
+
+
+@router.get("/indexed/{ixid}/preview")
+def preview_indexed(ixid: int, request: Request) -> Response:
+    try:
+        path = svc(request).indexed_path(ixid)
+    except Exception as e:
+        raise _guard(e) from e
+    return _preview(path, f"ix{ixid}", request)
+
+
+def _preview(path: Path, cache_key: str, request: Request) -> Response:
+    s = svc(request)
     if path.is_symlink() or not path.exists():
         raise HTTPException(404, "missing")
     ext = path.suffix.lower().lstrip(".")
@@ -122,7 +135,7 @@ def preview(fid: int, request: Request) -> Response:
         with path.open("r", encoding="utf-8", errors="replace") as f:
             return PlainTextResponse(f.read(2000))
     if path.is_file():
-        cache = request.app.state.thumb_dir / str(fid)
+        cache = request.app.state.thumb_dir / cache_key
         cache.mkdir(parents=True, exist_ok=True)
         thumb = s.platform.thumbnail(path, cache)
         if thumb is not None and thumb.exists():

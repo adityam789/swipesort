@@ -6,19 +6,27 @@ export const PREFETCH_LIMIT = 20
 export const REFILL_BELOW = 5
 export const UNDO_ALL_STEPS = 1_000_000
 
-export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox'
+export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox' | 'kept'
 
 export function outcomeOf(action: Edge['action']): Outcome {
   if (action === 'trash') return 'trashed'
   if (action === 'defer') return 'deferred'
   if (action === 'inbox') return 'inbox'
+  if (action === 'keep_both' || action === 'keep_this') return 'kept' // file continues to classification
   return 'moved'
+}
+
+/** keep_this / trash on a duplicate card resolves the duplicate (keep_both just defers the question). */
+export function resolvesDuplicate(card: Card, action: Edge['action']): boolean {
+  return card.kind === 'duplicate' && (action === 'keep_this' || action === 'trash')
 }
 
 export interface UndoEntry {
   key: number
   card: Card
   outcome: Outcome
+  /** 1 when this decision counted toward `duplicatesResolved`. */
+  dupResolved: number
   label: string
 }
 
@@ -43,6 +51,10 @@ export interface SessionState {
   fetching: boolean
   undoStack: UndoEntry[]
   counts: Record<Outcome, number>
+  /** Duplicate cards resolved with keep_this or trash. */
+  duplicatesResolved: number
+  /** Side-by-side duplicate compare panel (client-side only). */
+  detailsOpen: boolean
   toast: Toast | null
   lastFolder: FolderOut | null
   pickerOpen: boolean
@@ -69,6 +81,8 @@ export interface SessionState {
   openPicker: () => void
   closePicker: () => void
   togglePreview: () => void
+  openDetails: () => void
+  closeDetails: () => void
 }
 
 let keySeq = 0
@@ -81,7 +95,7 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   return next
 }
 
-const EMPTY_COUNTS = (): Record<Outcome, number> => ({ moved: 0, trashed: 0, deferred: 0, inbox: 0 })
+const EMPTY_COUNTS = (): Record<Outcome, number> => ({ moved: 0, trashed: 0, deferred: 0, inbox: 0, kept: 0 })
 
 const initial = () => ({
   sessionId: null,
@@ -95,6 +109,8 @@ const initial = () => ({
   fetching: false,
   undoStack: [] as UndoEntry[],
   counts: EMPTY_COUNTS(),
+  duplicatesResolved: 0,
+  detailsOpen: false,
   toast: null as Toast | null,
   lastFolder: null as FolderOut | null,
   pickerOpen: false,
@@ -181,7 +197,8 @@ export const useSession = create<SessionState>()((set, get) => ({
     const state = get()
     if (state.sessionId === null || state.queue[0]?.id !== card.id) return
     const outcome = outcomeOf(edge.action)
-    const entry: UndoEntry = { key: ++keySeq, card, outcome, label: edge.label }
+    const dupDelta = resolvesDuplicate(card, edge.action) ? 1 : 0
+    const entry: UndoEntry = { key: ++keySeq, card, outcome, dupResolved: dupDelta, label: edge.label }
     const body: DecideIn = {
       action: edge.action,
       target_folder_id: edge.target_folder_id ?? null,
@@ -192,11 +209,13 @@ export const useSession = create<SessionState>()((set, get) => ({
       queue: s.queue.slice(1),
       undoStack: [...s.undoStack, entry],
       counts: { ...s.counts, [outcome]: s.counts[outcome] + 1 },
+      duplicatesResolved: s.duplicatesResolved + dupDelta,
       inFlightIds: new Set(s.inFlightIds).add(card.id),
       flippedIds: without(s.flippedIds, card.id),
       deferredIds: outcome === 'deferred' ? new Set(s.deferredIds).add(card.id) : s.deferredIds,
       exhausted: false,
       previewOpen: false,
+      detailsOpen: false,
       shownAt: Date.now(),
       toast: {
         id: ++toastSeq,
@@ -223,6 +242,7 @@ export const useSession = create<SessionState>()((set, get) => ({
             queue: [card, ...s.queue.filter((c) => c.id !== card.id)],
             undoStack: s.undoStack.filter((u) => u.key !== entry.key),
             counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - 1) },
+            duplicatesResolved: Math.max(0, s.duplicatesResolved - dupDelta),
             inFlightIds: without(s.inFlightIds, card.id),
             deferredIds,
             shownAt: Date.now(),
@@ -260,6 +280,7 @@ export const useSession = create<SessionState>()((set, get) => ({
         queue: [entry.card, ...s.queue.filter((c) => c.id !== entry.card.id)],
         undoStack: s.undoStack.filter((u) => u.key !== entry.key),
         counts: { ...s.counts, [entry.outcome]: Math.max(0, s.counts[entry.outcome] - 1) },
+        duplicatesResolved: Math.max(0, s.duplicatesResolved - entry.dupResolved),
         deferredIds,
         exhausted: false,
         shownAt: Date.now(),
@@ -280,6 +301,7 @@ export const useSession = create<SessionState>()((set, get) => ({
         queue: s.queue.filter((c) => c.id !== entry.card.id),
         undoStack: [...s.undoStack, entry],
         counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + 1 },
+        duplicatesResolved: s.duplicatesResolved + entry.dupResolved,
         deferredIds: entry.outcome === 'deferred' ? new Set(s.deferredIds).add(entry.card.id) : s.deferredIds,
         toast: { id: ++toastSeq, kind: 'error', message: `Undo failed: ${errMsg(err)}`, undoable: false },
       }))
@@ -297,6 +319,7 @@ export const useSession = create<SessionState>()((set, get) => ({
         queue: [],
         undoStack: [],
         counts: EMPTY_COUNTS(),
+        duplicatesResolved: 0,
         deferredIds: new Set<string>(),
         exhausted: false,
         toast: { id: ++toastSeq, kind: 'info', message: 'Undid everything', undoable: false },
@@ -312,6 +335,8 @@ export const useSession = create<SessionState>()((set, get) => ({
   openPicker: () => set((s) => (s.queue.length ? { pickerOpen: true } : {})),
   closePicker: () => set({ pickerOpen: false }),
   togglePreview: () => set((s) => ({ previewOpen: s.queue.length ? !s.previewOpen : false })),
+  openDetails: () => set((s) => (s.queue[0]?.duplicate ? { detailsOpen: true } : {})),
+  closeDetails: () => set({ detailsOpen: false }),
 }))
 
 /** Hotkeys 1/2/3 for a pick layout, used when the backend sent no explicit `keys`. */

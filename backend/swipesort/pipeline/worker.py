@@ -20,14 +20,24 @@ from sqlmodel import Session as DB
 from sqlmodel import col, select
 
 from swipesort.config import Settings
-from swipesort.db.models import Extraction, File, FileStatus, Folder, IndexedFile, Suggestion
+from swipesort.db.models import (
+    Extraction,
+    Features,
+    File,
+    FileStatus,
+    Folder,
+    IndexedFile,
+    Suggestion,
+)
 from swipesort.db.models import Session as SessionRow
 from swipesort.engine import scoring
+from swipesort.engine.dedup import DedupItem, find_duplicates
 from swipesort.ml.embed import embed_cached
 from swipesort.ml.gateway import ModelUnavailable, Provider
 from swipesort.pipeline.digest import build_digest, tokenize_name
 from swipesort.pipeline.extractors.base import ExtractResult
 from swipesort.pipeline.extractors.registry import extract
+from swipesort.pipeline.features import compute_features
 from swipesort.pipeline.fingerprint import content_hash
 from swipesort.pipeline.scanner import scan
 from swipesort.platform.base import Platform
@@ -149,6 +159,27 @@ class SessionPipeline:
                     ):
                         results[done_h] = res
 
+            # 2b. dedup features (pHash/dHash, MinHash), cached by content hash
+            path_of = {hashes[k]: p for p, _r, _e, k in jobs if k in hashes}
+            feat_todo = [h for h in dict.fromkeys(hashes.values())
+                         if db.get(Features, h) is None]
+            if feat_todo:
+                texts, images = [], []
+                for h in feat_todo:
+                    r = results.get(h)
+                    ex = None if r is not None else db.get(Extraction, h)
+                    texts.append(r.text if r is not None else (ex.digest_text if ex else ""))
+                    images.append(r.is_image if r is not None
+                                  else bool(ex and ex.mime.startswith("image/")))
+                workers = self.settings.pipeline.extract_workers or None
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    feats = list(pool.map(compute_features, [path_of[h] for h in feat_todo],
+                                          texts, images,
+                                          [self.settings.dedup] * len(feat_todo)))
+                for h, fr in zip(feat_todo, feats, strict=True):
+                    db.add(Features(content_hash=h, **fr.model_dump()))
+                db.commit()
+
             # 3. digest (+ OCR / caption for images), cached by content hash
             digests: dict[str, str] = {}
             for path, rel, ext, key in jobs:
@@ -191,6 +222,9 @@ class SessionPipeline:
                     ix.content_hash = ih
                     db.add(ix)
             db.commit()
+
+            # 3b. duplicates (SPEC §5) -> duplicate suggestions; shown before classification
+            self._dedup(db, order, indexed, hashes)
 
             # 4. embed digests + folder profiles
             items = [(hashes[k], d) for k, d in digests.items()]
@@ -242,6 +276,45 @@ class SessionPipeline:
                 fresh.status = FileStatus.ready
                 db.add(fresh)
                 db.commit()
+
+    # ------------------------------------------------------------------ dedup
+    def _dedup(self, db: DB, order: list[File], indexed: list[IndexedFile],
+               hashes: dict[str, str]) -> None:
+        items: list[DedupItem] = []
+        for ix in indexed:
+            h = hashes.get(f"ix:{ix.id}")
+            if h:
+                items.append(self._dedup_item(db, f"ix:{ix.id}", "output", Path(ix.path), h))
+        for f in order:
+            h = hashes.get(f"f:{f.id}")
+            if h:
+                items.append(self._dedup_item(db, f"f:{f.id}", "input", Path(f.path), h))
+        for m in find_duplicates(items, self.settings.dedup):
+            fid = int(m.a.split(":")[1])
+            db.add(Suggestion(
+                session_id=self.sid, file_id=fid, kind="duplicate", confidence=m.similarity,
+                tier="duplicate", reason=m.reason,
+                candidates_json=json.dumps({"other": m.b, "relation": m.relation,
+                                            "similarity": m.similarity, "keep": m.keep}),
+            ))
+        db.commit()
+
+    @staticmethod
+    def _dedup_item(db: DB, key: str, side: str, path: Path, h: str) -> DedupItem:
+        ft = db.get(Features, h)
+        try:
+            st = path.stat()
+            size, mtime = st.st_size, st.st_mtime
+        except OSError:
+            size, mtime = 0, 0.0
+        return DedupItem(
+            key=key, side=side, name=path.name, size=size, mtime=mtime,
+            ext=path.suffix.lower().lstrip("."), content_hash=h,
+            quick_hash=ft.quick_hash if ft else "", phash=ft.phash if ft else "",
+            dhash=ft.dhash if ft else "", width=ft.width if ft else 0,
+            height=ft.height if ft else 0, minhash=ft.minhash if ft else b"",
+            text_len=ft.text_len if ft else 0,
+        )
 
     # ------------------------------------------------------------------ scoring
     def _rebuild_index(self) -> None:

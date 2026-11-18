@@ -12,6 +12,9 @@ export type Action =
   | 'choose_3'
   | 'inbox'
   | 'flip' // client-side only: swap card.edges for card.flip_edges (Confirm "Not this")
+  | 'keep_both' // duplicate: dismiss the duplicate and continue to classification
+  | 'keep_this' // duplicate: trash the OTHER copy, continue classifying this one
+  | 'details' // client-side only: show the side-by-side duplicate details panel
 
 export interface SessionCreate {
   input_root: string
@@ -57,6 +60,8 @@ export interface Edge {
   label: string
   action: Action
   target_folder_id?: number | null
+  /** Client-side rendering hint (not sent by the server): emphasise this edge. */
+  highlight?: boolean
 }
 
 export interface FileInfo {
@@ -84,9 +89,26 @@ export interface Candidate {
   p: number
 }
 
+export type DuplicateRelation = 'exact' | 'near_image' | 'near_text' | 'version'
+export type DuplicateRecommend = 'keep_this' | 'trash_this' | 'keep_both'
+
+export interface DuplicateInfo {
+  relation: DuplicateRelation
+  similarity: number // 0..1
+  other_name: string
+  other_rel_path: string // relative to its root, posix
+  other_side: 'input' | 'output'
+  other_size: number
+  other_mtime: number
+  other_preview_url: string // GET-able preview of the other copy
+  recommend: DuplicateRecommend
+  reason: string
+}
+
 export interface Card {
   id: string
   kind: CardKind
+  duplicate?: DuplicateInfo | null
   file: FileInfo
   reason: string
   edges: Partial<Record<Direction, Edge>>

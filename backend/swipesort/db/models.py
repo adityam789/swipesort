@@ -144,3 +144,16 @@ class Suggestion(SQLModel, table=True):
     model_version: str = ""
     created_at: datetime = Field(default_factory=now)
     stale: bool = False
+
+
+class Features(SQLModel, table=True):
+    """Dedup features cached by content hash (SPEC §5)."""
+
+    content_hash: str = Field(primary_key=True)
+    quick_hash: str = ""
+    phash: str = ""  # hex, images only
+    dhash: str = ""
+    width: int = 0
+    height: int = 0
+    minhash: bytes = b""  # datasketch LeanMinHash hashvalues as uint64 LE, text docs only
+    text_len: int = 0

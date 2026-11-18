@@ -1,9 +1,9 @@
 import { useEffect, useState } from 'react'
-import { fetchPreview, type PreviewData } from '../api/client'
+import { fetchPreview, type PreviewData, type PreviewSource } from '../api/client'
 
-type State = { fileId: number; data: PreviewData | null } | null
+type State = { fileId: PreviewSource; data: PreviewData | null } | null
 
-export function Preview({ fileId, ext, large = false }: { fileId: number; ext: string; large?: boolean }) {
+export function Preview({ fileId, ext, large = false }: { fileId: PreviewSource; ext: string; large?: boolean }) {
   const [state, setState] = useState<State>(null)
 
   useEffect(() => {

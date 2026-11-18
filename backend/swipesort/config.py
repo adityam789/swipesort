@@ -28,9 +28,13 @@ class Pipeline(BaseModel):
 
 
 class Dedup(BaseModel):
-    image_hamming: int = 6
-    text_jaccard: float = 0.85
-    version_low: float = 0.5
+    image_hamming: int = 6  # pHash AND dHash Hamming distance <= this -> near-dup image
+    text_jaccard: float = 0.85  # MinHash Jaccard >= this -> near-dup text
+    version_low: float = 0.25  # version-of: Jaccard in [version_low, text_jaccard) + similar stems
+    stem_similarity: float = 0.75  # SequenceMatcher ratio of version-normalized stems
+    minhash_perm: int = 128
+    shingle: int = 5  # word shingles
+    min_text_chars: int = 100  # below this, text near-dup / version-of are not attempted
 
 
 class Proposals(BaseModel):
