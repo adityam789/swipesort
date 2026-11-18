@@ -24,6 +24,7 @@ class Pipeline(BaseModel):
     embed_batch: int = 32
     max_text_chars: int = 4000
     pages: int = 2
+    extract_workers: int = 0  # 0 = os.cpu_count()
 
 
 class Dedup(BaseModel):
@@ -54,8 +55,26 @@ class Trash(BaseModel):
     purge_days: int = 30
 
 
+class Scoring(BaseModel):
+    # raw(F) = w · [s_centroid, s_profile, s_knn, s_meta]  (SPEC §3)
+    w_centroid: float = 1.0
+    w_profile: float = 0.6
+    w_profile_empty: float = 1.5  # profile weight when F has no files (cold start)
+    w_knn: float = 1.0
+    w_meta: float = 0.6
+    temperature: float = 0.08
+    knn_k: int = 10
+    meta_ext_share: float = 0.5  # s_meta = share*ext_prior + (1-share)*filename BM25
+    bm25_k1: float = 1.2
+    bm25_b: float = 0.75
+    leaf_only: bool = True
+
+
 class Models(BaseModel):
-    provider: str = "ollama"
+    provider: str = "ollama"  # ollama | fake
+    ollama_url: str = "http://127.0.0.1:11434"
+    fake_dim: int = 512
+    request_timeout_s: float = 60
     embed: str = "nomic-embed-text"
     vlm: str = "moondream"
     llm: str = "qwen2.5:7b-instruct"
@@ -94,6 +113,7 @@ class Server(BaseModel):
 
 class Settings(BaseModel):
     tiers: Tiers = Field(default_factory=Tiers)
+    scoring: Scoring = Field(default_factory=Scoring)
     pipeline: Pipeline = Field(default_factory=Pipeline)
     dedup: Dedup = Field(default_factory=Dedup)
     proposals: Proposals = Field(default_factory=Proposals)

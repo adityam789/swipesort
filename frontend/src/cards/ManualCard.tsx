@@ -1,11 +1,16 @@
 import type { Card } from '../api/types'
 import { formatDate, formatSize } from '../lib/format'
+import { CandidateList, ConfidenceMeter, KindChip } from './Insights'
 import { Preview } from './Preview'
 
 export function ManualCard({ card }: { card: Card }) {
   const { file } = card
   return (
     <div className="flex h-full flex-col gap-3">
+      <div className="flex items-center justify-between gap-2">
+        <KindChip kind={card.kind} />
+        {card.confidence != null && <ConfidenceMeter value={card.confidence} />}
+      </div>
       <div className="min-h-0 flex-1">
         <Preview fileId={file.id} ext={file.ext} />
       </div>
@@ -21,6 +26,7 @@ export function ManualCard({ card }: { card: Card }) {
           {file.rel_path}
         </p>
         {card.reason && <p className="text-xs italic text-stone-500 dark:text-stone-400">{card.reason}</p>}
+        <CandidateList candidates={card.candidates ?? []} />
       </div>
     </div>
   )

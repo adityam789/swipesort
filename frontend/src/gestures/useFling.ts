@@ -8,6 +8,9 @@ export type Edges = Partial<Record<Direction, Edge>>
 export interface FlingOptions {
   edges: Edges
   onFling: (dir: Direction) => void
+  /** Extra hotkeys declared by the card (`card.keys`), e.g. {"1": Edge}. Data-driven. */
+  keys?: Record<string, Edge>
+  onKey?: (edge: Edge, key: string) => void
   enabled?: boolean
   onUndo?: () => void
   onDefer?: () => void
@@ -123,6 +126,12 @@ export function useFling(options: FlingOptions) {
         return
       }
       if (mod || e.altKey) return
+      const keyEdge = o.keys?.[key]
+      if (keyEdge) {
+        e.preventDefault()
+        o.onKey?.(keyEdge, key)
+        return
+      }
       if (key === 'Tab') {
         e.preventDefault()
         o.onDefer?.()

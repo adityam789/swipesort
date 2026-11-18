@@ -13,6 +13,8 @@ const ORDER: Direction[] = ['up', 'right', 'down', 'left']
 
 function tone(edge: Edge): string {
   if (edge.action === 'trash') return 'border-red-300 text-red-700 dark:border-red-900 dark:text-red-300'
+  if (edge.action === 'flip' || edge.action === 'inbox')
+    return 'border-amber-300 text-amber-800 dark:border-amber-900 dark:text-amber-300'
   if (edge.action === 'defer') return 'border-stone-300 text-stone-600 dark:border-stone-700 dark:text-stone-400'
   return 'border-emerald-300 text-emerald-800 dark:border-emerald-900 dark:text-emerald-300'
 }
@@ -25,12 +27,18 @@ export interface CardViewProps {
   y?: MotionValue<number>
   rotate?: MotionValue<number>
   onEdgeClick?: (dir: Direction) => void
+  /** True when the card just flipped to its alternate layout (plays a quick flip animation). */
+  flipped?: boolean
 }
 
 /** Renders any card: edge labels come from `card.edges` (data-driven); the body is chosen by `card.kind`. */
-export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick }: CardViewProps) {
+export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick, flipped = false }: CardViewProps) {
+  const hotkey = (edge: Edge) =>
+    Object.entries(card.keys ?? {}).find(
+      ([, k]) => k.action === edge.action && k.label === edge.label && (k.target_folder_id ?? null) === (edge.target_folder_id ?? null),
+    )?.[0]
   return (
-    <div className="relative mx-auto h-full w-full max-w-xl px-14 py-12 md:px-36">
+    <div className="relative mx-auto h-full w-full max-w-xl px-14 py-12 md:px-36" style={{ perspective: 1000 }}>
       {ORDER.map((dir) => {
         const edge = card.edges[dir]
         if (!edge) return null
@@ -49,17 +57,21 @@ export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick }
             <span aria-hidden className="mr-1">
               {ARROW[dir]}
             </span>
+            {hotkey(edge) && (
+              <kbd className="mr-1 rounded bg-stone-200 px-1 font-mono text-[10px] dark:bg-stone-700">{hotkey(edge)}</kbd>
+            )}
             {edge.label}
           </button>
         )
       })}
       <motion.div
+        key={flipped ? 'flipped' : 'front'}
         {...(bind ? bind() : {})}
         data-testid="card"
         style={{ x, y, rotate, touchAction: 'none' }}
-        initial={{ opacity: 0, scale: 0.97 }}
-        animate={{ opacity: 1, scale: 1 }}
-        transition={{ duration: 0.12 }}
+        initial={{ opacity: 0, scale: 0.97, rotateY: flipped ? 90 : 0 }}
+        animate={{ opacity: 1, scale: 1, rotateY: 0 }}
+        transition={{ duration: flipped ? 0.18 : 0.12 }}
         className="h-full cursor-grab select-none rounded-2xl border border-stone-200 bg-white p-4 shadow-lg active:cursor-grabbing dark:border-stone-800 dark:bg-stone-900"
       >
         <CardBody card={card} />

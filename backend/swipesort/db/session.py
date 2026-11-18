@@ -13,7 +13,7 @@ from swipesort.db import models  # noqa: F401  (register tables)
 
 def make_engine(db_path: Path | str) -> Engine:
     url = "sqlite://" if str(db_path) == ":memory:" else f"sqlite:///{Path(db_path)}"
-    eng = create_engine(url, connect_args={"check_same_thread": False})
+    eng = create_engine(url, connect_args={"check_same_thread": False, "timeout": 30})
 
     @event.listens_for(eng, "connect")
     def _pragmas(conn, _rec):  # type: ignore[no-untyped-def]

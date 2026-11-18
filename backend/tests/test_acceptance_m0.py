@@ -9,6 +9,7 @@ import blake3
 import pytest
 from fastapi.testclient import TestClient
 
+from swipesort.config import Settings
 from swipesort.main import create_app
 from tests.fixtures.generate_corpus import generate
 
@@ -36,12 +37,16 @@ def test_sort_50_by_hand_then_undo_all(
 ) -> None:
     inp, out, truth = corpus
     before_in, before_out = snapshot(inp), snapshot(out)
-    client = TestClient(create_app(db_path=tmp_path / "s.db", static_dir=None))
+    settings = Settings()
+    settings.models.provider = "fake"
+    app = create_app(db_path=tmp_path / "s.db", settings=settings, static_dir=None)
+    client = TestClient(app)
 
     r = client.post("/api/sessions", json={"input_root": str(inp), "output_root": str(out)})
     assert r.status_code == 200, r.text
     sid = r.json()["id"]
     assert r.json()["progress"]["scanned"] == 50
+    assert app.state.service.pipelines[sid].wait(120)
 
     def folder_id(rel: str) -> int:
         folders = {f["path"]: f["id"] for f in client.get(f"/api/sessions/{sid}/folders").json()}

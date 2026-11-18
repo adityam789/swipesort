@@ -11,3 +11,4 @@ frontend/dist/
 *.db-wal
 *.db-shm
 .DS_Store
+.swipesort-test/

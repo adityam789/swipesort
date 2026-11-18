@@ -63,3 +63,39 @@ def test_nested(tmp_path: Path) -> None:
     assert "Work/PayPal/Onboarding/Docs" in m.categories
     assert (tmp_path / "c" / "output" / "Work/PayPal/Onboarding/Docs").is_dir()
     assert any(e.category == "Work/PayPal/Onboarding/Docs" for e in m.examples)
+
+
+def test_default_manifest_format_unchanged(tmp_path: Path) -> None:
+    generate(tmp_path / "c", n=30, seed=1)
+    text = (tmp_path / "c" / "manifest.json").read_text(encoding="utf-8")
+    assert '"hard"' not in text and "generic_name" not in text and "misleading_dir" not in text
+
+
+def test_hard_deterministic(tmp_path: Path) -> None:
+    m1 = generate(tmp_path / "a", n=80, seed=11, hard=True)
+    m2 = generate(tmp_path / "b", n=80, seed=11, hard=True)
+    assert m1.hard and m1.model_dump() == m2.model_dump()
+    assert _hashes(tmp_path / "a") == _hashes(tmp_path / "b")
+    assert generate(tmp_path / "c", n=80, seed=12, hard=True).model_dump() != m1.model_dump()
+    # hard mode must not change the easy corpus for the same seed
+    easy = generate(tmp_path / "e", n=80, seed=11)
+    assert easy.model_dump() != m1.model_dump()
+
+
+def test_hard_corpus(tmp_path: Path) -> None:
+    m = generate(tmp_path / "c", n=300, seed=0, hard=True)
+    assert len(m.entries) == 300
+    inp = tmp_path / "c" / "input"
+    for e in m.entries:
+        assert (inp / e.rel_path).exists(), e.rel_path
+        assert (tmp_path / "c" / "output" / e.category).is_dir()
+    for e in m.examples:
+        assert (tmp_path / "c" / "output" / e.rel_path).exists()
+    assert sum(e.generic_name for e in m.entries) >= 0.10 * len(m.entries)
+    assert sum(e.misleading_name for e in m.entries) >= 0.10 * len(m.entries)
+    assert any(e.misleading_dir for e in m.entries)
+    assert {e.kind for e in m.entries} >= {"invoice", "receipt", "tax_form", "resume", "screenshot"}
+    # template variety: some invoices never use the word "invoice"
+    plain = [inp / e.rel_path for e in m.entries
+             if e.kind == "invoice" and e.rel_path.lower().endswith((".txt", ".md"))]
+    assert plain and any(b"invoice" not in p.read_bytes().lower() for p in plain)

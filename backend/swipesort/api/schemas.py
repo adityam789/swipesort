@@ -7,7 +7,10 @@ from typing import Literal
 from pydantic import BaseModel
 
 Direction = Literal["right", "up", "left", "down"]
-Action = Literal["pick", "trash", "defer", "picker", "accept", "choose_1", "choose_2", "choose_3", "inbox"]
+Action = Literal[
+    "pick", "trash", "defer", "picker", "accept", "choose_1", "choose_2", "choose_3", "inbox",
+    "flip",  # client-side: swap card.edges for card.flip_edges (Confirm "Not this")
+]
 
 
 class SessionCreate(BaseModel):
@@ -17,6 +20,7 @@ class SessionCreate(BaseModel):
 
 class Progress(BaseModel):
     scanned: int = 0
+    processed: int = 0  # extracted + embedded + scored (READY or decided)
     ready: int = 0
     decided: int = 0
     remaining: int = 0
@@ -65,12 +69,22 @@ class FileInfo(BaseModel):
     is_bundle: bool
 
 
+class Candidate(BaseModel):
+    folder_id: int
+    path: str  # relative to output_root, posix
+    p: float
+
+
 class Card(BaseModel):
     id: str  # "m<file_id>" for manual cards in M0
     kind: Literal["manual", "confirm", "choices", "inbox", "duplicate", "batch", "proposal"]
     file: FileInfo
     reason: str = ""
     edges: dict[Direction, Edge]  # cards declare their edge targets as data
+    flip_edges: dict[Direction, Edge] | None = None  # shown after a "flip" (Confirm -> Choices)
+    confidence: float | None = None
+    candidates: list[Candidate] = []
+    keys: dict[str, Edge] = {}  # extra hotkeys, e.g. {"1": Edge, "2": Edge, "3": Edge}
 
 
 class DecideIn(BaseModel):

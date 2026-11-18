@@ -1,6 +1,6 @@
 import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useEffect, useState } from 'react'
-import { api } from '../api/client'
+import { api, prefetchPreview } from '../api/client'
 import type { Direction, Edge, FolderOut } from '../api/types'
 import { CardView } from '../cards/CardView'
 import { Preview } from '../cards/Preview'
@@ -27,26 +27,29 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
   const previewOpen = useSession((s) => s.previewOpen)
   const lastFolder = useSession((s) => s.lastFolder)
   const treeVersion = useSession((s) => s.treeVersion)
-  const { decide, undo, pickFolder, openPicker, closePicker, togglePreview, fetchMore, setProgress } = useSession.getState()
+  const flippedIds = useSession((s) => s.flippedIds)
+  const { decide, flip, undo, pickFolder, openPicker, closePicker, togglePreview, refresh } = useSession.getState()
   const [drawer, setDrawer] = useState<Drawer>(null)
 
   const card = queue[0]
 
-  // Poll session progress; also top up the queue while scanning streams in cards.
-  const { data: session } = useQuery({
-    queryKey: ['session', sessionId],
-    queryFn: () => api.getSession(sessionId),
-    refetchInterval: 3000,
-  })
-  useEffect(() => {
-    if (session) setProgress(session.progress)
-  }, [session, setProgress])
+  const analyzing = !card && progress.processed < progress.scanned
+
+  // Poll session progress + cards: every ~1s while analyzing, relaxed otherwise (new cards stream in).
   useEffect(() => {
     const t = setInterval(() => {
-      if (useSession.getState().queue.length < 5) void fetchMore()
-    }, 3000)
+      if (analyzing || useSession.getState().queue.length < 5) void refresh()
+    }, analyzing ? 1000 : 3000)
     return () => clearInterval(t)
-  }, [fetchMore])
+  }, [analyzing, refresh])
+
+  // Warm previews for the next two cards so they render instantly after a fling.
+  const next1 = queue[1]?.file.id
+  const next2 = queue[2]?.file.id
+  useEffect(() => {
+    if (next1 !== undefined) prefetchPreview(next1)
+    if (next2 !== undefined) prefetchPreview(next2)
+  }, [next1, next2])
 
   const { data: folders = [] } = useQuery({
     queryKey: ['folders', sessionId, treeVersion],
@@ -54,18 +57,23 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
     enabled: pickerOpen,
   })
 
-  const fling = (dir: Direction) => {
+  const act = (edge: Edge) => {
     if (!card) return
-    const edge = card.edges[dir]
-    if (!edge) return
     if (edge.action === 'picker') openPicker()
+    else if (edge.action === 'flip') flip(card.id)
     else decide(card, edge)
+  }
+  const fling = (dir: Direction) => {
+    const edge = card?.edges[dir]
+    if (edge) act(edge)
   }
 
   const { bind, x, y, rotate, aimed } = useFling({
     edges: card?.edges ?? {},
     enabled: !!card && !pickerOpen,
     onFling: fling,
+    keys: card?.keys,
+    onKey: act,
     onUndo: () => void undo(),
     onDefer: () => {
       if (!card) return
@@ -89,7 +97,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
     return f
   }
 
-  const done = !card && exhausted && !fetching
+  const done = !card && exhausted && !fetching && !analyzing
   if (done) return <><Summary onNew={onNew} /><ToastHost /></>
 
   const total = progress.decided + progress.remaining
@@ -112,7 +120,9 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
             <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
           </div>
           <p className="mt-1 text-xs text-stone-500">
-            {progress.decided} done · {progress.remaining} left · {queue.length} ready ahead
+            {progress.decided} done · {progress.remaining} left · <span data-testid="ready-ahead" title="Cards precomputed and ready">
+              {queue.length} ready ahead
+            </span>
           </p>
         </div>
         <button
@@ -137,9 +147,11 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
 
         <main className="min-w-0 flex-1 overflow-hidden p-2 md:p-6">
           {card ? (
-            <CardView key={card.id} card={card} aimed={aimed} bind={bind} x={x} y={y} rotate={rotate} onEdgeClick={fling} />
+            <CardView key={card.id} card={card} aimed={aimed} bind={bind} x={x} y={y} rotate={rotate} onEdgeClick={fling} flipped={flippedIds.has(card.id)} />
           ) : (
-            <div className="flex h-full items-center justify-center text-stone-400">Waiting for cards…</div>
+            <div data-testid="waiting" className="flex h-full items-center justify-center text-stone-400">
+              {analyzing ? `Analyzing files… ${progress.processed}/${progress.scanned}` : 'Waiting for cards…'}
+            </div>
           )}
         </main>
 

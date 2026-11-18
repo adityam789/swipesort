@@ -9,6 +9,8 @@ const card: Card = {
   id: 'm1',
   kind: 'manual',
   reason: '',
+  candidates: [],
+  keys: {},
   file: { id: 1, name: 'invoice.pdf', rel_path: 'a/invoice.pdf', size: 2048, mtime: 1_700_000_000, ext: '.pdf', is_bundle: false },
   edges: {
     left: { label: 'Elsewhere', action: 'picker' },
@@ -33,5 +35,27 @@ describe('CardView', () => {
     expect(screen.getByText('a/invoice.pdf')).toBeInTheDocument()
     expect(container.querySelector('[data-edge="down"]')).toHaveAttribute('data-aimed', 'true')
     expect(container.querySelector('[data-edge="up"]')).not.toHaveAttribute('data-aimed')
+  })
+
+  it('shows kind chip, confidence, reason, candidates and key hints', () => {
+    const pick = { label: 'Receipts', action: 'pick', target_folder_id: 3 } as const
+    const rich: Card = {
+      ...card,
+      kind: 'choices',
+      reason: 'matches 23 files',
+      confidence: 0.72,
+      candidates: [
+        { folder_id: 3, path: 'Receipts', p: 0.72 },
+        { folder_id: 4, path: 'Taxes/2025', p: 0.2 },
+      ],
+      edges: { right: pick },
+      keys: { '1': pick },
+    }
+    render(<CardView card={rich} />)
+    expect(screen.getByTestId('kind-chip')).toHaveAttribute('data-kind', 'choices')
+    expect(screen.getByTestId('confidence')).toHaveTextContent('72%')
+    expect(screen.getByText('matches 23 files')).toBeInTheDocument()
+    expect(screen.getByTestId('candidates')).toHaveTextContent('Taxes/2025')
+    expect(screen.getByText('1')).toBeInTheDocument()
   })
 })

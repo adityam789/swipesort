@@ -65,12 +65,42 @@ export type PreviewData =
   | { kind: 'image'; url: string }
   | { kind: 'text'; text: string }
 
-/** Fetch a preview once; image/* becomes a blob URL (caller revokes), text/* becomes a string. */
+interface RawPreview {
+  type: string
+  blob: Blob
+}
+
+const PREVIEW_CACHE_MAX = 8
+const rawCache = new Map<number, Promise<RawPreview | null>>()
+
+function loadRaw(fileId: number): Promise<RawPreview | null> {
+  const hit = rawCache.get(fileId)
+  if (hit) return hit
+  const p = fetch(previewUrl(fileId))
+    .then(async (res) => (res.ok ? { type: res.headers.get('content-type') ?? '', blob: await res.blob() } : null))
+    .catch(() => null)
+  rawCache.set(fileId, p)
+  void p.then((v) => {
+    if (v === null) rawCache.delete(fileId)
+  })
+  while (rawCache.size > PREVIEW_CACHE_MAX) {
+    const oldest = rawCache.keys().next().value
+    if (oldest === undefined) break
+    rawCache.delete(oldest)
+  }
+  return p
+}
+
+/** Warm the preview cache so the card renders instantly when it reaches the front. */
+export function prefetchPreview(fileId: number): void {
+  void loadRaw(fileId)
+}
+
+/** Fetch a preview (cached); image/* becomes a fresh blob URL (caller revokes), text/* becomes a string. */
 export async function fetchPreview(fileId: number, signal?: AbortSignal): Promise<PreviewData | null> {
-  const res = await fetch(previewUrl(fileId), { signal })
-  if (!res.ok) return null
-  const type = res.headers.get('content-type') ?? ''
-  if (type.startsWith('image/')) return { kind: 'image', url: URL.createObjectURL(await res.blob()) }
-  if (type.startsWith('text/')) return { kind: 'text', text: await res.text() }
+  const raw = await loadRaw(fileId)
+  if (!raw || signal?.aborted) return null
+  if (raw.type.startsWith('image/')) return { kind: 'image', url: URL.createObjectURL(raw.blob) }
+  if (raw.type.startsWith('text/')) return { kind: 'text', text: await raw.blob.text() }
   return null
 }

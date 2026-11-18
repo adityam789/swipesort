@@ -63,6 +63,20 @@ describe('useFling keys', () => {
     expect(h.onFling).not.toHaveBeenCalled()
   })
 
+  it('fires card-declared keys (data-driven) and ignores undeclared ones', async () => {
+    const keys = {
+      '1': { label: 'A', action: 'pick', target_folder_id: 1 },
+      '2': { label: 'B', action: 'pick', target_folder_id: 2 },
+    } as const
+    const onKey = vi.fn()
+    renderHook(() => useFling({ edges, onFling: vi.fn(), keys, onKey }))
+    await userEvent.setup().keyboard('213')
+    expect(onKey.mock.calls.map((c) => [c[1], c[0].target_folder_id])).toEqual([
+      ['2', 2],
+      ['1', 1],
+    ])
+  })
+
   it('does nothing when disabled', async () => {
     const onFling = vi.fn()
     renderHook(() => useFling({ edges, onFling, enabled: false }))

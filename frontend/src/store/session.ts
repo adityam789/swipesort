@@ -6,11 +6,12 @@ export const PREFETCH_LIMIT = 20
 export const REFILL_BELOW = 5
 export const UNDO_ALL_STEPS = 1_000_000
 
-export type Outcome = 'moved' | 'trashed' | 'deferred'
+export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox'
 
 export function outcomeOf(action: Edge['action']): Outcome {
   if (action === 'trash') return 'trashed'
   if (action === 'defer') return 'deferred'
+  if (action === 'inbox') return 'inbox'
   return 'moved'
 }
 
@@ -28,7 +29,7 @@ export interface Toast {
   undoable: boolean
 }
 
-const emptyProgress: Progress = { scanned: 0, ready: 0, decided: 0, remaining: 0 }
+const emptyProgress: Progress = { scanned: 0, processed: 0, ready: 0, decided: 0, remaining: 0 }
 
 export interface SessionState {
   sessionId: number | null
@@ -53,7 +54,13 @@ export interface SessionState {
   start: (session: SessionOut) => Promise<void>
   reset: () => void
   fetchMore: () => Promise<void>
+  /** Poll session progress + cards (used while files are still being analyzed). */
+  refresh: () => Promise<void>
   decide: (card: Card, edge: Edge) => void
+  /** Client-side "Not this": swap the front card's edges for its flip_edges. No network call. */
+  flip: (cardId: string) => void
+  /** Cards currently showing their flipped layout. */
+  flippedIds: Set<string>
   pickFolder: (folder: FolderOut) => void
   undo: () => Promise<void>
   undoAll: () => Promise<void>
@@ -74,6 +81,8 @@ function enqueue<T>(fn: () => Promise<T>): Promise<T> {
   return next
 }
 
+const EMPTY_COUNTS = (): Record<Outcome, number> => ({ moved: 0, trashed: 0, deferred: 0, inbox: 0 })
+
 const initial = () => ({
   sessionId: null,
   session: null,
@@ -81,10 +90,11 @@ const initial = () => ({
   queue: [] as Card[],
   deferredIds: new Set<string>(),
   inFlightIds: new Set<string>(),
+  flippedIds: new Set<string>(),
   exhausted: false,
   fetching: false,
   undoStack: [] as UndoEntry[],
-  counts: { moved: 0, trashed: 0, deferred: 0 },
+  counts: EMPTY_COUNTS(),
   toast: null as Toast | null,
   lastFolder: null as FolderOut | null,
   pickerOpen: false,
@@ -136,6 +146,37 @@ export const useSession = create<SessionState>()((set, get) => ({
     }
   },
 
+  refresh: async () => {
+    const { sessionId } = get()
+    if (sessionId === null) return
+    try {
+      // Session first, cards second: if the snapshot says everything is processed, the
+      // cards fetched afterwards are guaranteed to include everything that is READY.
+      const session = await api.getSession(sessionId)
+      if (get().sessionId !== sessionId) return
+      await get().fetchMore()
+      if (get().sessionId !== sessionId) return
+      set({ progress: session.progress })
+    } catch (e) {
+      set({ toast: { id: ++toastSeq, kind: 'error', message: errMsg(e), undoable: false } })
+    }
+  },
+
+  flip: (cardId) => {
+    set((s) => {
+      const card = s.queue[0]
+      if (!card || card.id !== cardId || !card.flip_edges) return {}
+      const flipped: Card = {
+        ...card,
+        kind: 'choices',
+        edges: card.flip_edges,
+        flip_edges: null,
+        keys: Object.keys(card.keys).length ? card.keys : numberKeys(card.flip_edges),
+      }
+      return { queue: [flipped, ...s.queue.slice(1)], flippedIds: new Set(s.flippedIds).add(cardId) }
+    })
+  },
+
   decide: (card, edge) => {
     const state = get()
     if (state.sessionId === null || state.queue[0]?.id !== card.id) return
@@ -152,6 +193,7 @@ export const useSession = create<SessionState>()((set, get) => ({
       undoStack: [...s.undoStack, entry],
       counts: { ...s.counts, [outcome]: s.counts[outcome] + 1 },
       inFlightIds: new Set(s.inFlightIds).add(card.id),
+      flippedIds: without(s.flippedIds, card.id),
       deferredIds: outcome === 'deferred' ? new Set(s.deferredIds).add(card.id) : s.deferredIds,
       exhausted: false,
       previewOpen: false,
@@ -254,7 +296,7 @@ export const useSession = create<SessionState>()((set, get) => ({
         treeVersion: s.treeVersion + 1,
         queue: [],
         undoStack: [],
-        counts: { moved: 0, trashed: 0, deferred: 0 },
+        counts: EMPTY_COUNTS(),
         deferredIds: new Set<string>(),
         exhausted: false,
         toast: { id: ++toastSeq, kind: 'info', message: 'Undid everything', undoable: false },
@@ -271,6 +313,16 @@ export const useSession = create<SessionState>()((set, get) => ({
   closePicker: () => set({ pickerOpen: false }),
   togglePreview: () => set((s) => ({ previewOpen: s.queue.length ? !s.previewOpen : false })),
 }))
+
+/** Hotkeys 1/2/3 for a pick layout, used when the backend sent no explicit `keys`. */
+function numberKeys(edges: Card['edges']): Record<string, Edge> {
+  const keys: Record<string, Edge> = {}
+  for (const dir of ['right', 'up', 'left'] as const) {
+    const e = edges[dir]
+    if (e?.action === 'pick') keys[String(Object.keys(keys).length + 1)] = e
+  }
+  return keys
+}
 
 function without(set: Set<string>, id: string): Set<string> {
   const next = new Set(set)

@@ -11,6 +11,7 @@ from swipesort.api.routes import router
 from swipesort.api.service import SessionService
 from swipesort.config import Settings, app_dir, get_settings
 from swipesort.db.session import make_engine
+from swipesort.ml.gateway import Provider
 from swipesort.platform.base import Platform
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
@@ -20,6 +21,7 @@ def create_app(
     db_path: Path | str | None = None,
     settings: Settings | None = None,
     platform: Platform | None = None,
+    provider: Provider | None = None,
     static_dir: Path | None = FRONTEND_DIST,
 ) -> FastAPI:
     settings = settings or get_settings()
@@ -28,7 +30,7 @@ def create_app(
         home.mkdir(parents=True, exist_ok=True)
         db_path = home / "swipesort.db"
     app = FastAPI(title="SwipeSort", version="0.1.0")
-    app.state.service = SessionService(make_engine(db_path), settings, platform)
+    app.state.service = SessionService(make_engine(db_path), settings, platform, provider)
     app.state.thumb_dir = home / "thumbs"
     app.include_router(router)
     if static_dir is not None and static_dir.is_dir():

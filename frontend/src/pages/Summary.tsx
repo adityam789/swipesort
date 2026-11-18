@@ -5,13 +5,14 @@ export function Summary({ onNew }: { onNew: () => void }) {
   const undoAll = useSession((s) => s.undoAll)
   const stats: [string, number][] = [
     ['Moved', counts.moved],
+    ['Inbox', counts.inbox],
     ['Trashed', counts.trashed],
     ['Deferred', counts.deferred],
   ]
   return (
     <div className="mx-auto flex h-full max-w-md flex-col items-center justify-center gap-6 px-5 text-center">
       <h2 className="text-2xl font-semibold">All sorted</h2>
-      <dl className="grid w-full grid-cols-3 gap-3">
+      <dl className="grid w-full grid-cols-2 sm:grid-cols-4 gap-3">
         {stats.map(([k, v]) => (
           <div key={k} className="rounded-xl border border-stone-200 bg-white p-4 dark:border-stone-800 dark:bg-stone-900">
             <dd className="text-3xl font-semibold tabular-nums">{v}</dd>

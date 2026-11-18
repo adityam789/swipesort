@@ -95,3 +95,52 @@ class Op(SQLModel, table=True):
     status: OpStatus = OpStatus.intent
     ts: datetime = Field(default_factory=now)
     error: str = ""
+
+
+class Extraction(SQLModel, table=True):
+    """Stage output cached by content hash (SPEC §7 caching)."""
+
+    content_hash: str = Field(primary_key=True)
+    mime: str = ""
+    digest_text: str = ""
+    metadata_json: str = "{}"
+    page_count: int = 0
+    ocr_used: bool = False
+
+
+class Embedding(SQLModel, table=True):
+    """Digest embeddings, keyed by (content_hash|text-key, model). vec = float32 little-endian."""
+
+    key: str = Field(primary_key=True)  # content_hash, or "folder-profile:<sha1 of text>"
+    model: str = Field(primary_key=True)
+    dim: int
+    vec: bytes
+
+
+class IndexedFile(SQLModel, table=True):
+    """A file currently living in the output tree (pre-existing or placed this session)."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="session.id", index=True)
+    folder_id: int = Field(foreign_key="folder.id", index=True)
+    path: str
+    name: str
+    ext: str = ""
+    content_hash: str = ""
+    file_id: int | None = None  # set when it was placed by a decision this session
+
+
+class Suggestion(SQLModel, table=True):
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="session.id", index=True)
+    file_id: int = Field(foreign_key="file.id", index=True)
+    kind: str = "classify"  # classify|duplicate|batch|folder_proposal
+    candidates_json: str = "[]"  # [{folder_id, path, p, signals:{...}}] sorted desc
+    confidence: float = 0.0
+    tier: str = "inbox"  # confirm|choices|inbox
+    reason: str = ""
+    tree_version: int = 0
+    index_version: int = 0
+    model_version: str = ""
+    created_at: datetime = Field(default_factory=now)
+    stale: bool = False

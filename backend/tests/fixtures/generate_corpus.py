@@ -1,10 +1,10 @@
 """Synthetic messy-folder corpus with ground truth (SPEC §15).
 
-    uv run python tests/fixtures/generate_corpus.py OUT_DIR --n 300 --seed 0 [--nested]
+    uv run python tests/fixtures/generate_corpus.py OUT_DIR --n 300 --seed 0 [--nested] [--hard]
 
 Writes OUT_DIR/input (the mess), OUT_DIR/output (pre-seeded category tree with a few
 examples per category) and OUT_DIR/manifest.json (ground truth). Fully deterministic
-for a given (seed, n, nested) on a given set of installed libraries.
+for a given (seed, n, nested, hard) on a given set of installed libraries.
 """
 
 from __future__ import annotations
@@ -14,13 +14,16 @@ import datetime as dt
 import io
 import random
 import shutil
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 from pydantic import BaseModel, Field
 from reportlab.lib.pagesizes import letter
+from reportlab.lib.utils import ImageReader
 from reportlab.pdfgen import canvas
 
 try:  # optional: real .docx / .pptx when the libs happen to be installed
@@ -43,12 +46,15 @@ class Entry(BaseModel):
     near_dup_of: str | None = None
     version_of: str | None = None
     misleading_name: bool = False
+    generic_name: bool = False  # hard mode: "document (3).pdf", "scan0001.pdf", "IMG_0001.png"
+    misleading_dir: bool = False  # hard mode: lives in an input folder themed for another category
 
 
 class Manifest(BaseModel):
     seed: int
     n: int
     nested: bool
+    hard: bool = False
     categories: list[str] = Field(default_factory=list)
     entries: list[Entry] = Field(default_factory=list)  # input files
     examples: list[Entry] = Field(default_factory=list)  # pre-seeded output/ files
@@ -230,6 +236,18 @@ def render_md(lines: list[str]) -> bytes:
     return f"# {lines[0]}\n\n{body}\n".encode()
 
 
+def _stable_zip(data: bytes) -> bytes:
+    """Rewrite an OOXML zip with fixed member timestamps (the libs stamp wall-clock time)."""
+    out = io.BytesIO()
+    with zipfile.ZipFile(io.BytesIO(data)) as src, zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as dst:
+        for info in src.infolist():
+            zi = zipfile.ZipInfo(info.filename, date_time=(2025, 1, 1, 12, 0, 0))
+            zi.compress_type = zipfile.ZIP_DEFLATED
+            zi.external_attr = info.external_attr
+            dst.writestr(zi, src.read(info.filename))
+    return out.getvalue()
+
+
 def render_docx(lines: list[str]) -> bytes:  # only used when python-docx is importable
     assert _docx is not None
     d = _docx.Document()
@@ -241,7 +259,7 @@ def render_docx(lines: list[str]) -> bytes:  # only used when python-docx is imp
         d.add_paragraph(line)
     buf = io.BytesIO()
     d.save(buf)
-    return buf.getvalue()
+    return _stable_zip(buf.getvalue())
 
 
 def render_pptx(lines: list[str]) -> bytes:  # only used when python-pptx is importable
@@ -260,7 +278,7 @@ def render_pptx(lines: list[str]) -> bytes:  # only used when python-pptx is imp
         sl.placeholders[1].text = "\n".join(chunk[1:]) or chunk[0]
     buf = io.BytesIO()
     p.save(buf)
-    return buf.getvalue()
+    return _stable_zip(buf.getvalue())
 
 
 RENDERERS: dict[str, Callable[[list[str]], bytes]] = {
@@ -279,6 +297,7 @@ class Made:
     data: bytes = b""
     files: dict[str, bytes] | None = None  # bundle folders (ext == "")
     lines: list[str] | None = None  # editable text, for making versions
+    sparse: bool = False  # hard mode: near-empty / image-only document
 
     @property
     def is_bundle(self) -> bool:
@@ -544,6 +563,442 @@ GENERATORS: dict[str, Callable[[random.Random], Made]] = {
     "onboarding_doc": gen_onboarding, "meeting_notes": gen_meeting,
 }
 
+# --------------------------------------------------------------------------- hard mode (--hard)
+# Messier, more realistic content: several layouts per kind, shared vocabulary across categories,
+# sparse/scanned files and image-only PDFs. Every file stays classifiable by a careful human.
+
+HARD_EMPLOYERS = [*EMPLOYERS, "PayPal", "Stripe Labs"]
+RESTAURANTS = [
+    ("Luigi's Trattoria", ["Margherita pizza", "Linguine", "Tiramisu", "House salad", "Espresso"]),
+    ("Golden Dragon", ["Kung pao chicken", "Fried rice", "Spring rolls", "Hot and sour soup"]),
+    ("Blue Fin Sushi", ["Salmon nigiri", "Dragon roll", "Miso soup", "Edamame", "Green tea"]),
+    ("Maple Diner", ["Pancake stack", "Club sandwich", "Milkshake", "Fries", "Coffee"]),
+]
+# Input sub-folders people really use, per kind (truthful), reused as misleading for other kinds.
+DIR_THEMES: dict[str, list[str]] = {
+    "invoice": ["Downloads/invoices", "Bills and invoices"],
+    "receipt": ["Downloads/receipts", "Receipts 2025"],
+    "tax_form": ["Downloads/taxes", "Tax docs"],
+    "resume": ["Job hunt", "Downloads/resume stuff"],
+    "lecture_notes": ["Downloads/school", "Classes"],
+    "lecture_slides": ["Downloads/school", "Classes"],
+    "photo": ["Camera roll", "Trip pics"],
+    "screenshot": ["Screenshots", "Desktop pics"],
+    "onboarding_doc": ["New job", "Downloads/work"],
+    "meeting_notes": ["Downloads/work", "Work stuff"],
+}
+
+
+def _generic_stem(rng: random.Random, kind: str) -> str:
+    if kind in IMAGE_KINDS:
+        return rng.choice([f"IMG_{rng.randint(1, 300):04d}", f"image ({rng.randint(1, 9)})",
+                           "download", f"IMG_{rng.randint(1, 300):04d}"])
+    return rng.choice([f"document ({rng.randint(1, 9)})", f"scan{rng.randint(1, 60):04d}",
+                       "untitled", "Untitled document", "New Document", "download",
+                       f"file ({rng.randint(1, 9)})", "attachment",
+                       f"Scan {_date(rng, 2025).isoformat()}"])
+
+
+def _line_items(rng: random.Random, lo: int = 3, hi: int = 6) -> list[tuple[str, int, int]]:
+    return [(s, rng.randint(1, 20), rng.randint(2000, 45000))
+            for s in rng.sample(SERVICES, rng.randint(lo, hi))]
+
+
+def gen_invoice_hard(rng: random.Random) -> Made:
+    v = rng.randrange(6)
+    if v == 0:
+        return gen_invoice(rng)
+    vendor, client = rng.sample(VENDORS, 2)
+    vtag = vendor.split()[0]
+    d = _date(rng, 2025)
+    due = d + dt.timedelta(days=rng.choice([14, 21, 30, 45]))
+    items = _line_items(rng)
+    sub = sum(q * u for _, q, u in items)
+    tax = sub * rng.choice([0, 5, 8]) // 100
+    total = sub + tax
+    ref = rng.randint(1000, 99999)
+    mon = d.strftime("%b%Y")
+    if v == 1:
+        lines = [f"{vendor} - Statement of charges", f"Account holder: {client}",
+                 f"Statement no. ST-{ref}", f"Period ending: {d.isoformat()}",
+                 "Item | Qty | Rate | Charge"]
+        lines += [f"{s} | {q} | {_money(u)} | {_money(q * u)}" for s, q, u in items]
+        lines += [f"Tax: {_money(tax)}", f"Amount due: {_money(total)}", f"Pay by {due.isoformat()}",
+                  "Balances unpaid after the due date accrue 1.5% interest per month."]
+        return _doc("invoice", rng.choice([f"{vtag}_statement_{mon}", f"{vtag}_{mon}"]), "pdf", lines)
+    if v == 2:
+        lines = ["BILL", vendor, f"Bill no. B{ref}", f"Customer: {client}", _address(rng),
+                 f"Issued: {d.isoformat()}"]
+        lines += [f"{s} - {_money(q * u)}" for s, q, u in items]
+        lines += [f"Balance owed: {_money(total)}",
+                  f"Please pay within {(due - d).days} days of the issue date.",
+                  "Remit by ACH or cheque payable to " + vendor + "."]
+        return _doc("invoice", rng.choice([f"{vtag}_bill_{ref}", f"{vtag}_{mon}"]), "pdf", lines)
+    if v == 3:
+        first = rng.choice(FIRST)
+        lines = [f"Subject: Payment due for work completed - {vendor}", f"Hi {first},",
+                 (f"Here is what you owe for {items[0][0].lower()} and {items[1][0].lower()} "
+                 f"delivered this month.")]
+        lines += [f"  {s}: {_money(q * u)}" for s, q, u in items]
+        lines += [f"Total owed: {_money(total)}", f"Please wire the money by {due.isoformat()}.",
+                  f"Bank details: {vendor} operating account, routing 02100{rng.randint(1000, 9999)}",
+                  "Thanks, accounts team"]
+        return _doc("invoice", f"{vtag}_email_{mon}", rng.choice(["txt", "md"]), lines)
+    if v == 4:
+        lines = [f"{vendor} - Request for payment", f"To: {client}", f"Reference: PR-{ref}",
+                 f"Date: {d.isoformat()}", "Work completed to date:"]
+        lines += [f"{s} x{q} @ {_money(u)}" for s, q, u in items]
+        lines += [f"Amount payable: {_money(total)}", f"Payable on or before {due.isoformat()}",
+                  "Overdue amounts may be referred to collections."]
+        ext = "docx" if _docx and rng.random() < 0.4 else "pdf"
+        return _doc("invoice", f"{vtag}_payment_request", ext, lines)
+    lines = [f"{vendor} - Services rendered", f"Client: {client}", f"Period: {d:%B %Y}",
+             "Task | Hours | Rate"]
+    rate = rng.choice([85, 95, 120, 150])
+    hours = [rng.randint(2, 30) for _ in items]
+    lines += [f"{s} | {h} h | ${rate}/h" for (s, _, _), h in zip(items, hours, strict=True)]
+    lines += [f"Hours billed: {sum(hours)}", f"Balance due: {_money(sum(hours) * rate * 100)}",
+              f"Net {(due - d).days} terms. Make payment to {vendor}."]
+    return _doc("invoice", f"{vtag}_hours_{mon}", "pdf", lines)
+
+
+def gen_receipt_hard(rng: random.Random) -> Made:
+    v = rng.randrange(6)
+    if v == 0:
+        return gen_receipt(rng)
+    d = _date(rng, 2025)
+    card = f"VISA ending {rng.randint(1000, 9999)}"
+    if v == 1:  # service-vendor payment receipt, mentions the invoice it settles
+        vendor = rng.choice(VENDORS)
+        items = _line_items(rng, 1, 3)
+        total = sum(q * u for _, q, u in items)
+        lines = [vendor, "PAYMENT RECEIPT", f"Payment received: {d.isoformat()}",
+                 f"Re: invoice #INV-2025-{rng.randint(100, 9999):04d}"]
+        lines += [f"{s}: {_money(q * u)}" for s, q, u in items]
+        lines += [f"Amount paid: {_money(total)}", f"Paid via {rng.choice(['ACH transfer', card, 'wire'])}",
+                  "Balance remaining: $0.00", "Thank you for your payment."]
+        return _doc("receipt", f"{vendor.split()[0]}_{d:%b%Y}", "pdf", lines)
+    if v == 2:  # online order
+        store, goods = rng.choice(STORES)
+        picked = rng.sample(goods, rng.randint(2, min(4, len(goods))))
+        prices = [rng.randint(299, 6999) for _ in picked]
+        lines = [f"{store} - Order confirmation", f"Order #{rng.randint(100000, 999999)}",
+                 f"Placed on {d.isoformat()}"]
+        lines += [f"{g} (qty {rng.randint(1, 3)}): {_money(p)}" for g, p in zip(picked, prices, strict=True)]
+        lines += [f"Shipping: {_money(rng.choice([0, 499, 799]))}", f"Total charged to {card}: {_money(sum(prices))}",
+                  "Payment status: Paid", "Keep this email as your receipt."]
+        return _doc("receipt", f"{store.split()[0]}_order_{d:%b%d}", rng.choice(["pdf", "txt"]), lines)
+    if v == 3:  # restaurant
+        place, dishes = rng.choice(RESTAURANTS)
+        picked = rng.sample(dishes, rng.randint(2, min(4, len(dishes))))
+        prices = [rng.randint(450, 3200) for _ in picked]
+        sub = sum(prices)
+        tip = sub * rng.choice([15, 18, 20]) // 100
+        lines = [place, f"Table {rng.randint(1, 30)}   Server: {rng.choice(FIRST)}",
+                 f"{d.isoformat()} {rng.randint(11, 22)}:{rng.randint(0, 59):02d}"]
+        lines += [f"{g}   {_money(p)}" for g, p in zip(picked, prices, strict=True)]
+        lines += [f"Subtotal {_money(sub)}", f"Tip {_money(tip)}", f"Total {_money(sub + tip)}",
+                  f"Paid {card}", "Thanks for dining with us"]
+        return _doc("receipt", f"{place.split()[0]}_{d:%b%d}", "pdf", lines)
+    if v == 4:  # retail receipt that carries an "invoice #" like real ones do
+        store, goods = rng.choice(STORES)
+        picked = rng.sample(goods, rng.randint(2, min(4, len(goods))))
+        prices = [rng.randint(199, 4999) for _ in picked]
+        sub = sum(prices)
+        lines = [store.upper(), _address(rng), (f"Invoice #: {rng.randint(100000, 999999)}   "
+                 f"Cashier: {rng.choice(FIRST)}"), f"{d.isoformat()}"]
+        lines += [f"{g} {_money(p)}" for g, p in zip(picked, prices, strict=True)]
+        lines += [f"Subtotal {_money(sub)}", f"Total {_money(sub * 107 // 100)}", f"Tendered: {card}",
+                  "Customer copy - returns accepted within 30 days with this receipt"]
+        return _doc("receipt", f"{store.split()[0]}_{d:%b%d}", "pdf", lines)
+    fare = rng.randint(800, 6500)  # ride receipt
+    lines = ["CityCab - Trip receipt", f"Trip date: {d.isoformat()}", f"Pickup: {_address(rng)}",
+             f"Drop-off: {_address(rng)}", f"Fare: {_money(fare)}", f"Tip: {_money(fare // 6)}",
+             f"Total charged: {_money(fare + fare // 6)} to {card}", "Thanks for riding."]
+    return _doc("receipt", f"trip_{d:%b%d}", "pdf", lines)
+
+
+def gen_tax_hard(rng: random.Random) -> Made:
+    v = rng.randrange(6)
+    if v == 0:
+        return gen_tax_form(rng)
+    who, d = _person(rng), _date(rng, 2025)
+    if v == 1:
+        lender = rng.choice(VENDORS)
+        lines = ["Form 1098 Mortgage Interest Statement 2025", f"Lender: {lender} Bank",
+                 f"Borrower: {who}", f"Box 1 Mortgage interest received: {_money(rng.randint(500_000, 2_200_000))}",
+                 f"Box 5 Mortgage insurance premiums: {_money(rng.randint(20_000, 150_000))}",
+                 f"Box 6 Points paid on purchase: {_money(rng.randint(0, 300_000))}",
+                 "Tax year: 2025", "This is important tax information and is being furnished to the IRS."]
+        return _doc("tax_form", rng.choice(["1098_2025", f"{lender.split()[0]}_mortgage_2025"]), "pdf", lines)
+    if v == 2:
+        lines = [f"2025 tax prep worksheet - {who}", "Deductible expenses paid this year:"]
+        for vendor, svc in zip(rng.sample(VENDORS, 5), rng.sample(SERVICES, 5), strict=True):
+            lines.append(f"{vendor} - {svc.lower()}: {_money(rng.randint(15_000, 480_000))}")
+        lines += [f"Total deductions: {_money(rng.randint(600_000, 2_400_000))}",
+                  f"Estimated federal tax owed: {_money(rng.randint(100_000, 1_800_000))}",
+                  "Hand to accountant before the filing deadline."]
+        return _doc("tax_form", f"tax_prep_{rng.randint(1, 9)}", rng.choice(["md", "txt", "pdf"]), lines)
+    if v == 3:
+        lines = ["Form 1040-ES Estimated Tax Payment Voucher 2025", "Department of the Treasury - Internal Revenue Service",
+                 f"Name: {who}", f"Payment due: {rng.choice(['April 15', 'June 16', 'September 15', 'January 15'])}",
+                 f"Amount of estimated tax: {_money(rng.randint(80_000, 900_000))}",
+                 "Make check payable to United States Treasury"]
+        return _doc("tax_form", f"1040ES_voucher_{rng.randint(1, 4)}", "pdf", lines)
+    if v == 4:
+        lines = [f"Dear {who.split()[0]},", "Enclosed is a summary of your 2025 federal and state tax returns.",
+                 f"Adjusted gross income: {_money(rng.randint(4_000_000, 14_000_000))}",
+                 f"Total tax: {_money(rng.randint(400_000, 2_000_000))}",
+                 f"Refund expected: {_money(rng.randint(10_000, 400_000))}",
+                 "Please review, sign Form 8879 and return it so we can e-file with the IRS.",
+                 f"Regards, {rng.choice(LAST)} & Co. CPAs"]
+        return _doc("tax_form", f"tax_return_summary_{d:%b}", rng.choice(["pdf", "txt"]), lines)
+    lines = ["Schedule C - Profit or Loss From Business (2025)", f"Proprietor: {who}", "Principal business: consulting"]
+    for client in rng.sample(VENDORS, 3):
+        lines.append(f"Gross receipts from {client}: {_money(rng.randint(200_000, 3_500_000))}")
+    lines += [f"Line 28 Total expenses: {_money(rng.randint(100_000, 1_500_000))}",
+              f"Line 31 Net profit: {_money(rng.randint(200_000, 5_000_000))}"]
+    return _doc("tax_form", f"ScheduleC_{who.split()[1]}", "pdf", lines)
+
+
+def gen_resume_hard(rng: random.Random) -> Made:
+    v = rng.randrange(5)
+    if v == 0:
+        return gen_resume(rng)
+    who = _person(rng)
+    first = who.split()[0].lower()
+    ext = rng.choice(["pdf", "pdf", "docx" if _docx else "md", "md"])
+    if v == 1:
+        lines = [f"Curriculum Vitae - {who}", f"Contact: {first}@example.com", "Employment history"]
+        for _ in range(rng.randint(2, 4)):
+            lines.append(f"{rng.randint(2010, 2020)}-{rng.randint(2021, 2025)}  {rng.choice(HARD_EMPLOYERS)}, "
+                         f"{rng.choice(JOBS)}")
+        lines += ["Education", f"M.S., University of {rng.choice(CITIES)}",
+                  "Certifications: " + ", ".join(rng.sample(SKILLS, 3))]
+        return _doc("resume", f"CV_{who.split()[1]}", ext, lines)
+    if v == 2:
+        lines = [who, f"{rng.choice(JOBS)} at {rng.choice(HARD_EMPLOYERS)}", "About",
+                 (f"I build things. {rng.randint(3, 15)} years across {rng.choice(HARD_EMPLOYERS)} and "
+                 f"{rng.choice(HARD_EMPLOYERS)}."), "Experience"]
+        for _ in range(rng.randint(2, 3)):
+            lines += [f"{rng.choice(JOBS)} - {rng.choice(HARD_EMPLOYERS)}",
+                      f"  Worked with {', '.join(rng.sample(SKILLS, 3))}"]
+        lines += ["Skills: " + " | ".join(rng.sample(SKILLS, 5)), "Open to new roles"]
+        return _doc("resume", f"{who.replace(' ', '')}_profile", ext, lines)
+    if v == 3:
+        lines = [f"{who} - {rng.choice(JOBS)}", f"{first}@example.com", "Work experience"]
+        for _ in range(rng.randint(2, 3)):
+            lines.append(f"{rng.choice(HARD_EMPLOYERS)} ({rng.randint(2014, 2020)}-{rng.randint(2021, 2025)}): "
+                         f"{rng.choice(JOBS)}, {rng.choice(['promoted twice', 'led a team of 5', 'shipped v2'])}")
+        lines += ["Languages: English, " + rng.choice(["Spanish", "Hindi", "Mandarin"]), "References available upon request"]
+        return _doc("resume", rng.choice([f"{who.split()[1]}_{rng.choice(JOBS).split()[0]}", "my_resume_2025"]), ext, lines)
+    lines = [f"RESUME OF {who.upper()}", "Objective: seeking a challenging role where I can grow",
+             f"Most recent employer: {rng.choice(HARD_EMPLOYERS)}", "Skills: " + ", ".join(rng.sample(SKILLS, 7)),
+             f"Education: B.Sc. {rng.randint(2005, 2022)}", "Hobbies: climbing, chess"]
+    return _doc("resume", f"{who.split()[1]}_application", ext, lines)
+
+
+def gen_lecture_notes_hard(rng: random.Random) -> Made:
+    v = rng.randrange(5)
+    if v == 0:
+        return gen_lecture_notes(rng)
+    course = rng.choice(sorted(COURSES))
+    topic, terms = COURSES[course]
+    wk = rng.randint(1, 14)
+    a, b, c = rng.sample(terms, 3)
+    ext = rng.choice(["md", "txt", "md", "docx" if _docx else "txt"])
+    stem = rng.choice([f"{course.replace(' ', '')}_wk{wk}", f"notes_{wk}", f"{topic.split()[0]}_{wk}"])
+    if v == 1:  # Cornell style
+        lines = [f"{course} week {wk}", "Cues | Notes", f"{a} | what it is, why it matters in {topic}",
+                 f"{b} | contrast with {c}; prof gave two examples", f"{c} | likely on the exam",
+                 f"Summary: {a} and {b} both feed into {c}."]
+    elif v == 2:  # scrappy outline
+        lines = [f"{topic.lower()} - {_date(rng, 2025):%b %d}", f"* {a}: prof spent 20 min on this",
+                 f"* {b} (see textbook ch. {rng.randint(2, 12)})", f"  - ties back to {c}",
+                 f"TODO before next class: read the section on {a}, do problem set {rng.randint(1, 9)}",
+                 f"Q for office hours: why does {b} not apply to {c}?"]
+    elif v == 3:  # study-group meeting-shaped
+        lines = [f"Study group - {course} {topic}", f"Date: {_date(rng, 2025).isoformat()}",
+                 f"Present: {_person(rng)}, {_person(rng)}", "Agenda: go over this week's lecture",
+                 f"- Discussed {a} and how it relates to {b}", f"- Still confused about {c}",
+                 f"Action items: everyone reviews {a} before the {rng.choice(['quiz', 'midterm'])}"]
+    else:  # textbook reading notes
+        lines = [f"{topic} - chapter {rng.randint(1, 12)} reading notes", f"Key term: {a}",
+                 f"Definition: {a} describes how a system relates to {b}.", f"Key term: {c}",
+                 f"Example in the text uses {b}; the lecture added {c}.", "Review questions at end of chapter unanswered"]
+    return _doc("lecture_notes", stem, ext, lines)
+
+
+def gen_lecture_slides_hard(rng: random.Random) -> Made:
+    v = rng.randrange(3)
+    if v == 0:
+        return gen_lecture_slides(rng)
+    course = rng.choice(sorted(COURSES))
+    topic, terms = COURSES[course]
+    wk = rng.randint(1, 14)
+    ext = "pptx" if _pptx else "md"
+    stem = rng.choice([f"{course.replace(' ', '')}_L{wk}", f"week{wk}", f"{topic.split()[0]}_slides"])
+    if v == 1:
+        lines = [f"{topic}: week {wk}", "Learning objectives", f"- Explain {terms[0]}",
+                 f"- Apply {terms[1]} to a worked problem", "Agenda", "- Recap", f"- {terms[2].capitalize()}", "- Q&A"]
+        for t in rng.sample(terms, 3):
+            lines += [f"{t.capitalize()}", f"- Key idea behind {t}", f"- Where {t} shows up in {topic}"]
+        lines += ["Summary", "Questions?"]
+    else:
+        lines = [f"{course} midterm review"]
+        for t in rng.sample(terms, 4):
+            lines += [f"Review: {t}", f"- Be able to define {t}", f"- Practice problem on {t}"]
+    return _doc("lecture_slides", stem, ext, lines)
+
+
+def gen_onboarding_hard(rng: random.Random) -> Made:
+    v = rng.randrange(4)
+    if v == 0:
+        return gen_onboarding(rng)
+    who = _person(rng)
+    ext = rng.choice(["pdf", "md"])
+    if v == 1:
+        lines = [f"Welcome to PayPal, {who.split()[0]}!", f"Your manager: {_person(rng)}",
+                 "Day one: pick up your laptop and badge from the front desk", "Week one: shadow the Payments team",
+                 f"Questions? Ask your buddy, {rng.choice(FIRST)}", "Your first sprint starts the following Monday"]
+        stem = "welcome_to_PayPal"
+    elif v == 2:
+        lines = ["New hire checklist", f"Name: {who}", f"Start date: {_date(rng, 2025).isoformat()}"]
+        lines += [f"[ ] {t}" for t in rng.sample(["Set up 2FA", "Sign the NDA", "Enroll in benefits",
+                                                     "Complete security training", "Request repo access",
+                                                     "Submit direct deposit form"], 5)]
+        stem = rng.choice(["checklist", "new_hire_checklist"])
+    else:
+        lines = ["Policy acknowledgment", (f"I, {who}, confirm that I have read the PayPal code of conduct and "
+                 "the acceptable use policy for company systems."), "Signature: ____________",
+                 f"Date: {_date(rng, 2025).isoformat()}", "Return to HR within your first five days."]
+        stem = "acknowledgment"
+    return _doc("onboarding_doc", stem, ext, lines)
+
+
+def gen_meeting_hard(rng: random.Random) -> Made:
+    v = rng.randrange(4)
+    if v == 0:
+        return gen_meeting(rng)
+    title = rng.choice(MEETINGS)
+    thing = rng.choice(["ledger migration", "fraud rules", "checkout latency fix", "API v3"])
+    ext = rng.choice(["md", "txt"])
+    if v == 1:
+        lines = [f"Notes - {title}", f"Agenda: status of the {thing}, blockers, next steps",
+                 f"Attendees: {_person(rng)}, {_person(rng)}", f"Discussion: {rng.choice(FIRST)} raised concerns about the {thing}",
+                 f"Action items: {rng.choice(FIRST)} to update the {thing} plan by Friday", "Next sync: Thursday 10:00"]
+    elif v == 2:
+        lines = [f"{title} recap", f"- Key takeaway: the {thing} slipped one week",
+                 f"- Decision: keep the {thing} in the current quarter", f"- Owner: {rng.choice(FIRST)}",
+                 "- Customers affected: merchants on the payments platform", "- Follow-up scheduled"]
+    else:
+        a, b = _person(rng), _person(rng)
+        lines = [f"1:1 {a.split()[0]} / {b.split()[0]}", f"{a.split()[0]}: wants more ownership of the {thing}",
+                 f"{b.split()[0]}: feedback on last sprint, promotion timeline", "Goals for next quarter: ship, mentor, document"]
+    return _doc("meeting_notes", title.replace(" ", "_").replace(":", "") + rng.choice(["", "_notes", "_recap"]), ext, lines)
+
+
+def gen_photo_hard(rng: random.Random) -> Made:
+    m = gen_photo(rng)
+    if rng.random() < 0.4:  # re-encode without EXIF (exported / messaged / edited photos)
+        img = Image.open(io.BytesIO(m.data))
+        buf = io.BytesIO()
+        if m.ext.lower() == "png":
+            img.save(buf, "PNG")
+        else:
+            img.convert("RGB").save(buf, "JPEG", quality=85)
+        m = Made("photo", m.stem, m.ext, buf.getvalue())
+    return m
+
+
+def _text_font(size: int) -> ImageFont.ImageFont | ImageFont.FreeTypeFont:
+    try:
+        return ImageFont.load_default(size=size)
+    except (TypeError, OSError):
+        return ImageFont.load_default()
+
+
+def gen_screenshot_hard(rng: random.Random) -> Made:
+    if rng.random() < 0.4:
+        return gen_screenshot(rng)
+    # screenshot of a document (invoice, receipt, ...): the text is pixels, not a file
+    kind = rng.choice(["invoice", "invoice", "receipt", "resume", "lecture_notes", "tax_form"])
+    src = HARD_GENERATORS[kind](rng)
+    lines = (src.lines or [src.stem])[:16]
+    w, h = 900, 560
+    img = Image.new("RGB", (w, h), (rng.randint(225, 250),) * 3)
+    d = ImageDraw.Draw(img)
+    d.rectangle((0, 0, w, 30), fill=(60, 60, 70))
+    d.text((12, 8), f"{src.stem}.{src.ext} - Preview", fill=(240, 240, 240), font=_text_font(14))
+    d.rectangle((120, 44, w - 120, h - 12), fill=(255, 255, 255), outline=(180, 180, 180))
+    font = _text_font(15)
+    for i, line in enumerate(lines):
+        d.text((140, 56 + i * 29), line[:70], fill=(20, 20, 20), font=font)
+    buf = io.BytesIO()
+    img.save(buf, "PNG")
+    t = dt.datetime(2024, 1, 1) + dt.timedelta(seconds=rng.randrange(366 * 86400))
+    return Made("screenshot", f"Screenshot {t:%Y-%m-%d} at {t:%I.%M.%S %p}", "png", buf.getvalue())
+
+
+HARD_GENERATORS: dict[str, Callable[[random.Random], Made]] = {
+    "invoice": gen_invoice_hard, "receipt": gen_receipt_hard, "tax_form": gen_tax_hard,
+    "resume": gen_resume_hard, "lecture_notes": gen_lecture_notes_hard,
+    "lecture_slides": gen_lecture_slides_hard, "photo": gen_photo_hard,
+    "screenshot": gen_screenshot_hard, "code_project": gen_code_project,
+    "onboarding_doc": gen_onboarding_hard, "meeting_notes": gen_meeting_hard,
+}
+
+
+def _one_liner(rng: random.Random, kind: str) -> str:
+    d = _date(rng, 2025).isoformat()
+    course = rng.choice(sorted(COURSES))
+    topic, terms = COURSES[course]
+    return {
+        "invoice": f"{rng.choice(VENDORS)} - payment due {d} - {_money(rng.randint(20000, 900000))} owed",
+        "receipt": f"{rng.choice(STORES)[0]} - paid {_money(rng.randint(300, 20000))} on {d} - thank you",
+        "tax_form": f"Form {rng.choice(['W-2', '1099-NEC', '1040'])} tax year 2025 - {_money(rng.randint(500_000, 9_000_000))}",
+        "resume": f"{_person(rng)} - {rng.choice(JOBS)} - {rng.choice(FIRST).lower()}@example.com - resume",
+        "lecture_notes": f"{course} {topic}: {', '.join(rng.sample(terms, 3))} - lecture notes",
+        "lecture_slides": f"{course} {topic} - lecture slides",
+        "onboarding_doc": "PayPal new hire: laptop pickup Monday, badge at front desk",
+        "meeting_notes": f"Team meeting notes {d} - action: {rng.choice(['ship', 'review', 'defer'])} the API v3",
+    }[kind]
+
+
+def make_sparse(rng: random.Random, m: Made) -> Made:
+    """Replace a document by a near-empty version: one line of text, or an image-only scan."""
+    assert m.lines is not None
+    if rng.random() < 0.5:
+        sm = _doc(m.kind, m.stem, m.ext, [_one_liner(rng, m.kind)])
+    else:
+        sm = Made(m.kind, m.stem, "pdf", render_scan_pdf(rng, m.lines))
+    sm.lines = None  # sparse docs are not re-versioned
+    sm.sparse = True
+    return sm
+
+
+def render_scan_pdf(rng: random.Random, lines: list[str]) -> bytes:
+    """A PDF whose only content is a (slightly skewed) raster page: no text layer."""
+    w, h = 850, 1100
+    page = Image.new("L", (w, h), 250)
+    d = ImageDraw.Draw(page)
+    f_title, f_body = _text_font(26), _text_font(18)
+    y = 70
+    for i, line in enumerate(lines[:28]):
+        d.text((60, y), line[:80], fill=20, font=f_title if i == 0 else f_body)
+        y += 44 if i == 0 else 30
+    page = page.rotate(rng.uniform(-1.2, 1.2), resample=Image.Resampling.BICUBIC, fillcolor=245)
+    png = io.BytesIO()
+    page.save(png, "PNG")
+    png.seek(0)
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=letter, invariant=1, pageCompression=0)
+    pw, ph = letter
+    c.drawImage(ImageReader(png), 0, 0, width=pw, height=ph)
+    c.save()
+    return buf.getvalue()
+
+
 # --------------------------------------------------------------------------- derived files
 
 
@@ -646,8 +1101,10 @@ def _write(base: Path, rel: str, m: Made) -> None:
 # --------------------------------------------------------------------------- main
 
 
-def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Manifest:
+def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
+             hard: bool = False) -> Manifest:
     rng = random.Random(seed)
+    gens = HARD_GENERATORS if hard else GENERATORS
     kinds = dict(KINDS)
     categories = list(BASE_CATEGORIES)
     if nested:
@@ -660,14 +1117,14 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
     (out / "input").mkdir(parents=True)
     for cat in categories:
         (out / "output" / cat).mkdir(parents=True)
-    manifest = Manifest(seed=seed, n=n, nested=nested, categories=sorted(categories))
+    manifest = Manifest(seed=seed, n=n, nested=nested, hard=hard, categories=sorted(categories))
 
     # ---- pre-seeded output examples (clean names, a few per category)
     namer_out = _Namer()
     for kind, (cat, _) in sorted(kinds.items()):
         count = 2 if kind == "code_project" else (3 if kind not in ("lecture_slides",) else 2)
         for _ in range(count):
-            m = GENERATORS[kind](rng)
+            m = gens[kind](rng)
             name = namer_out.claim(cat, _full_name(m))
             _write(out / "output", f"{cat}/{name}", m)
             manifest.examples.append(Entry(rel_path=f"{cat}/{name}", category=cat, kind=kind))
@@ -685,7 +1142,7 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
         name = namer.claim(dir_, name)
         rel = f"{dir_}/{name}" if dir_ else name
         kind = m.kind
-        entry = Entry(rel_path=rel, category=kinds[kind][0], kind=kind, **entry_kw)  # type: ignore[arg-type]
+        entry = Entry(rel_path=rel, category=kinds[kind][0], kind=kind, **entry_kw)
         _write(out / "input", rel, m)
         p = _Placed(m, entry, dir_)
         placed.append(p)
@@ -694,26 +1151,54 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
     base: list[_Placed] = []
     for _ in range(n_base):
         kind = _weighted(rng, kind_table)
-        m = GENERATORS[kind](rng)
+        m = gens[kind](rng)
+        if hard and kind in DOC_KINDS and rng.random() < 0.10:
+            m = make_sparse(rng, m)
         dir_ = _weighted(rng, [(d, w) for d, w in INPUT_DIRS])
+        bad_dir = False
+        if hard and not m.is_bundle:
+            r = rng.random()
+            if r < 0.08:  # a folder that happens to be right
+                dir_ = rng.choice(DIR_THEMES[kind])
+            elif r < 0.15:  # a folder themed for a different category
+                wrong = sorted({d for k, ds in DIR_THEMES.items() if kinds.get(k, ("",))[0] != kinds[kind][0]
+                                for d in ds} - set(DIR_THEMES[kind]))
+                dir_, bad_dir = rng.choice(wrong), True
         if m.is_bundle:  # keep projects near the top level, as people do
             dir_ = rng.choice(["", "", "Desktop stuff"])
-        base.append(place(m, {}, dir_, _full_name(m, _messy(rng, m.stem))))
+        base.append(place(m, {"misleading_dir": bad_dir}, dir_, _full_name(m, _messy(rng, m.stem))))
 
-    # misleading names (~5% of non-bundle base files)
-    candidates = [b for b in base if not b.made.is_bundle]
-    n_mis = round(0.05 * len(base))
-    for b in rng.sample(candidates, min(n_mis, len(candidates))):
-        pool = GENERIC_STEMS + CROSS_STEMS.get(b.made.kind, []) * 2
-        if b.made.kind in IMAGE_KINDS:
-            pool = CROSS_STEMS[b.made.kind]
-        new_stem = rng.choice(pool)
+    def rename(b: _Placed, new_stem: str) -> None:
         old = out / "input" / b.entry.rel_path
         new_name = namer.claim(b.dir, f"{new_stem}.{b.made.ext}")
         new_rel = f"{b.dir}/{new_name}" if b.dir else new_name
         old.rename(out / "input" / new_rel)
         b.entry.rel_path = new_rel
-        b.entry.misleading_name = True
+
+    candidates = [b for b in base if not b.made.is_bundle]
+    if hard:  # ~15% generic names (sparse scans favoured) and ~15% misleading names
+        n_pick = round(0.15 * len(candidates))
+        sparse = [b for b in candidates if b.made.sparse]
+        others = [b for b in candidates if not b.made.sparse]
+        n_sp = min(len(sparse), round(0.6 * len(sparse)), n_pick)
+        generic = rng.sample(sparse, n_sp) + rng.sample(others, min(len(others), n_pick - n_sp))
+        taken = {id(b) for b in generic}
+        for b in generic:
+            rename(b, _generic_stem(rng, b.made.kind))
+            b.entry.generic_name = True
+        rest = [b for b in candidates if id(b) not in taken]
+        mislead = rng.sample(rest, min(n_pick, len(rest)))
+        for b in mislead:
+            rename(b, rng.choice(CROSS_STEMS[b.made.kind]))
+            b.entry.misleading_name = True
+    else:  # misleading names (~5% of non-bundle base files)
+        n_mis = round(0.05 * len(base))
+        for b in rng.sample(candidates, min(n_mis, len(candidates))):
+            pool = GENERIC_STEMS + CROSS_STEMS.get(b.made.kind, []) * 2
+            if b.made.kind in IMAGE_KINDS:
+                pool = CROSS_STEMS[b.made.kind]
+            rename(b, rng.choice(pool))
+            b.entry.misleading_name = True
 
     def derived_name(p: _Placed, style: str) -> str:
         stem = Path(p.entry.rel_path).stem
@@ -727,7 +1212,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
     for src in rng.sample(pool_exact, min(n_exact, len(pool_exact))):
         style = rng.choice(["num", "copy", "copyof", "dash"])
         dir_ = src.dir if rng.random() < 0.5 else _weighted(rng, list(INPUT_DIRS))
-        place(src.made, {"dup_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name},
+        place(src.made, {"dup_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name,
+         "generic_name": src.entry.generic_name},
               dir_, derived_name(src, style))
 
     # resized image copies
@@ -736,7 +1222,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
         m = make_resized(src.made)
         stem = Path(src.entry.rel_path).stem
         dir_ = src.dir if rng.random() < 0.5 else _weighted(rng, list(INPUT_DIRS))
-        place(m, {"near_dup_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name},
+        place(m, {"near_dup_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name,
+         "generic_name": src.entry.generic_name},
               dir_, f"{stem}{rng.choice(['_small', '_resized', ' (1)', '_web'])}.{m.ext}")
 
     # edited docs
@@ -744,11 +1231,16 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False) -> Ma
     for src in rng.sample(pool_doc, min(n_version, len(pool_doc))):
         m = make_version(rng, src.made)
         style = rng.choice(["v2", "final", "num", "copy"])
-        place(m, {"version_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name},
+        place(m, {"version_of": src.entry.rel_path, "misleading_name": src.entry.misleading_name,
+         "generic_name": src.entry.generic_name},
               src.dir, derived_name(src, style))
 
     manifest.entries = sorted((p.entry for p in placed), key=lambda e: e.rel_path)
-    (out / "manifest.json").write_text(manifest.model_dump_json(indent=2), encoding="utf-8")
+    skip: Any = {}
+    if not hard:  # keep the default-mode manifest.json byte-identical to the pre-hard format
+        extra = {"generic_name", "misleading_dir"}
+        skip = {"hard": True, "entries": {"__all__": extra}, "examples": {"__all__": extra}}
+    (out / "manifest.json").write_text(manifest.model_dump_json(indent=2, exclude=skip), encoding="utf-8")
     return manifest
 
 
@@ -758,8 +1250,9 @@ def main() -> None:
     ap.add_argument("--n", type=int, default=300)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--nested", action="store_true")
+    ap.add_argument("--hard", action="store_true", help="realistic, ambiguous corpus")
     a = ap.parse_args()
-    m = generate(a.out, a.n, a.seed, a.nested)
+    m = generate(a.out, a.n, a.seed, a.nested, a.hard)
     kinds: dict[str, int] = {}
     for e in m.entries:
         kinds[e.kind] = kinds.get(e.kind, 0) + 1

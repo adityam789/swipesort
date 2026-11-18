@@ -11,6 +11,7 @@ export type Action =
   | 'choose_2'
   | 'choose_3'
   | 'inbox'
+  | 'flip' // client-side only: swap card.edges for card.flip_edges (Confirm "Not this")
 
 export interface SessionCreate {
   input_root: string
@@ -19,6 +20,7 @@ export interface SessionCreate {
 
 export interface Progress {
   scanned: number
+  processed: number
   ready: number
   decided: number
   remaining: number
@@ -76,12 +78,22 @@ export type CardKind =
   | 'batch'
   | 'proposal'
 
+export interface Candidate {
+  folder_id: number
+  path: string
+  p: number
+}
+
 export interface Card {
   id: string
   kind: CardKind
   file: FileInfo
   reason: string
   edges: Partial<Record<Direction, Edge>>
+  flip_edges?: Partial<Record<Direction, Edge>> | null
+  confidence?: number | null
+  candidates: Candidate[]
+  keys: Record<string, Edge>
 }
 
 export interface DecideIn {
