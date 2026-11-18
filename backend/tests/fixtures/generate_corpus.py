@@ -13,6 +13,7 @@ import argparse
 import datetime as dt
 import io
 import random
+import re
 import shutil
 import zipfile
 from collections.abc import Callable
@@ -1600,6 +1601,9 @@ class _Namer:
     seen: set[str] = field(default_factory=set)
 
     def claim(self, directory: str, name: str) -> str:
+        # Messy names must still be legal on Windows (CI runs there): no <>:"/\|?* or
+        # control chars, no trailing dots/spaces.
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).rstrip(". ") or "_"
         p = Path(name)
         stem, ext, n = p.stem if p.suffix else name, p.suffix, 1
         cand = name

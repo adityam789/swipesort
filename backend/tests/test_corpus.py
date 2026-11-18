@@ -14,7 +14,7 @@ from generate_corpus import generate
 def _hashes(root: Path) -> dict[str, str]:
     return {
         p.relative_to(root).as_posix(): hashlib.sha256(p.read_bytes()).hexdigest()
-        for p in sorted(root.rglob("*"))
+        for p in sorted(root.rglob("*"), key=lambda q: q.as_posix())
         if p.is_file()
     }
 
@@ -133,7 +133,7 @@ def _stable_digest(root: Path) -> str:
     """Hash of the manifest, every path, and the bytes of files whose encoding does not depend on
     the installed libjpeg/zlib/python-docx versions."""
     h = hashlib.sha256()
-    for p in sorted(root.rglob("*")):
+    for p in sorted(root.rglob("*"), key=lambda q: q.as_posix()):
         if p.is_file():
             h.update(p.relative_to(root).as_posix().encode())
             if p.suffix.lower() not in {".jpg", ".jpeg", ".png", ".docx", ".pptx"}:
@@ -144,7 +144,7 @@ def _stable_digest(root: Path) -> str:
 # Computed on the generator before nested mode was reworked: nested=False output must not drift.
 NON_NESTED_DIGESTS = {
     (60, 1, False): "a2afe244dadeafcd31d5ce2779a261d9ebac05340af8a14861ef86fc84a555fa",
-    (80, 11, True): "9e087ef650917e53416226a5d45c6978b10747721b096601417a74149054a0a2",
+    (80, 11, True): "4d8bf8fa015afca42c567bdb19667c926ccf6fbb9c1b026f8c494816bb639beb",
 }
 
 
