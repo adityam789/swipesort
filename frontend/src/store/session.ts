@@ -1,0 +1,287 @@
+import { create } from 'zustand'
+import { api } from '../api/client'
+import type { Card, DecideIn, Edge, FolderOut, Progress, SessionOut } from '../api/types'
+
+export const PREFETCH_LIMIT = 20
+export const REFILL_BELOW = 5
+export const UNDO_ALL_STEPS = 1_000_000
+
+export type Outcome = 'moved' | 'trashed' | 'deferred'
+
+export function outcomeOf(action: Edge['action']): Outcome {
+  if (action === 'trash') return 'trashed'
+  if (action === 'defer') return 'deferred'
+  return 'moved'
+}
+
+export interface UndoEntry {
+  key: number
+  card: Card
+  outcome: Outcome
+  label: string
+}
+
+export interface Toast {
+  id: number
+  kind: 'info' | 'error'
+  message: string
+  undoable: boolean
+}
+
+const emptyProgress: Progress = { scanned: 0, ready: 0, decided: 0, remaining: 0 }
+
+export interface SessionState {
+  sessionId: number | null
+  session: SessionOut | null
+  progress: Progress
+  queue: Card[]
+  /** Cards decided (or deferred) locally; never shown again this pass. */
+  deferredIds: Set<string>
+  inFlightIds: Set<string>
+  exhausted: boolean
+  fetching: boolean
+  undoStack: UndoEntry[]
+  counts: Record<Outcome, number>
+  toast: Toast | null
+  lastFolder: FolderOut | null
+  pickerOpen: boolean
+  previewOpen: boolean
+  /** Bumped after each decision/undo so trees & folder lists refetch. */
+  treeVersion: number
+  shownAt: number
+
+  start: (session: SessionOut) => Promise<void>
+  reset: () => void
+  fetchMore: () => Promise<void>
+  decide: (card: Card, edge: Edge) => void
+  pickFolder: (folder: FolderOut) => void
+  undo: () => Promise<void>
+  undoAll: () => Promise<void>
+  setProgress: (p: Progress) => void
+  dismissToast: () => void
+  openPicker: () => void
+  closePicker: () => void
+  togglePreview: () => void
+}
+
+let keySeq = 0
+let toastSeq = 0
+// Serialises server mutations so undo always lands after the decision it targets.
+let chain: Promise<unknown> = Promise.resolve()
+function enqueue<T>(fn: () => Promise<T>): Promise<T> {
+  const next = chain.then(fn, fn)
+  chain = next.catch(() => undefined)
+  return next
+}
+
+const initial = () => ({
+  sessionId: null,
+  session: null,
+  progress: emptyProgress,
+  queue: [] as Card[],
+  deferredIds: new Set<string>(),
+  inFlightIds: new Set<string>(),
+  exhausted: false,
+  fetching: false,
+  undoStack: [] as UndoEntry[],
+  counts: { moved: 0, trashed: 0, deferred: 0 },
+  toast: null as Toast | null,
+  lastFolder: null as FolderOut | null,
+  pickerOpen: false,
+  previewOpen: false,
+  treeVersion: 0,
+  shownAt: Date.now(),
+})
+
+export const useSession = create<SessionState>()((set, get) => ({
+  ...initial(),
+
+  start: async (session) => {
+    chain = Promise.resolve()
+    set({ ...initial(), sessionId: session.id, session, progress: session.progress })
+    await get().fetchMore()
+  },
+
+  reset: () => set(initial()),
+
+  fetchMore: async () => {
+    const { sessionId, fetching } = get()
+    if (sessionId === null || fetching) return
+    set({ fetching: true })
+    try {
+      const cards = await api.getCards(sessionId, PREFETCH_LIMIT)
+      if (get().sessionId !== sessionId) return
+      set((s) => {
+        const known = new Set(s.queue.map((c) => c.id))
+        const candidates = cards.filter((c) => !known.has(c.id) && !s.inFlightIds.has(c.id))
+        let fresh = candidates.filter((c) => !s.deferredIds.has(c.id))
+        let deferredIds = s.deferredIds
+        // Deferred cards come back once everything else is done (the server orders them last).
+        if (fresh.length === 0 && s.queue.length === 0 && candidates.length > 0) {
+          fresh = candidates
+          deferredIds = new Set<string>()
+        }
+        const queue = [...s.queue, ...fresh]
+        return {
+          queue,
+          deferredIds,
+          exhausted: fresh.length === 0,
+          shownAt: s.queue.length === 0 && fresh.length > 0 ? Date.now() : s.shownAt,
+        }
+      })
+    } catch (e) {
+      set({ toast: { id: ++toastSeq, kind: 'error', message: errMsg(e), undoable: false } })
+    } finally {
+      set({ fetching: false })
+    }
+  },
+
+  decide: (card, edge) => {
+    const state = get()
+    if (state.sessionId === null || state.queue[0]?.id !== card.id) return
+    const outcome = outcomeOf(edge.action)
+    const entry: UndoEntry = { key: ++keySeq, card, outcome, label: edge.label }
+    const body: DecideIn = {
+      action: edge.action,
+      target_folder_id: edge.target_folder_id ?? null,
+      latency_ms: Math.max(0, Date.now() - state.shownAt),
+    }
+    // Optimistic advance: the next card shows immediately.
+    set((s) => ({
+      queue: s.queue.slice(1),
+      undoStack: [...s.undoStack, entry],
+      counts: { ...s.counts, [outcome]: s.counts[outcome] + 1 },
+      inFlightIds: new Set(s.inFlightIds).add(card.id),
+      deferredIds: outcome === 'deferred' ? new Set(s.deferredIds).add(card.id) : s.deferredIds,
+      exhausted: false,
+      previewOpen: false,
+      shownAt: Date.now(),
+      toast: {
+        id: ++toastSeq,
+        kind: 'info',
+        message: `${truncate(card.file.name)} → ${edge.label}`,
+        undoable: true,
+      },
+    }))
+    if (get().queue.length < REFILL_BELOW) void get().fetchMore()
+
+    void enqueue(() => api.decide(card.id, body)).then(
+      (res) =>
+        set((s) => ({
+          progress: res.progress,
+          treeVersion: s.treeVersion + 1,
+          inFlightIds: without(s.inFlightIds, card.id),
+        })),
+      (err) =>
+        // Roll back: restore the card at the front and drop its undo entry.
+        set((s) => {
+          const deferredIds = new Set(s.deferredIds)
+          deferredIds.delete(card.id)
+          return {
+            queue: [card, ...s.queue.filter((c) => c.id !== card.id)],
+            undoStack: s.undoStack.filter((u) => u.key !== entry.key),
+            counts: { ...s.counts, [outcome]: Math.max(0, s.counts[outcome] - 1) },
+            inFlightIds: without(s.inFlightIds, card.id),
+            deferredIds,
+            shownAt: Date.now(),
+            toast: {
+              id: ++toastSeq,
+              kind: 'error',
+              message: `Couldn't apply that: ${errMsg(err)}`,
+              undoable: false,
+            },
+          }
+        }),
+    )
+  },
+
+  pickFolder: (folder) => {
+    const card = get().queue[0]
+    set({ pickerOpen: false, lastFolder: folder })
+    if (!card) return
+    get().decide(card, {
+      label: `Move to ${folder.path || folder.name}`,
+      action: 'pick',
+      target_folder_id: folder.id,
+    })
+  },
+
+  undo: async () => {
+    const { sessionId, undoStack } = get()
+    const entry = undoStack[undoStack.length - 1]
+    if (sessionId === null || !entry) return
+    // Optimistic: bring the card back right away.
+    set((s) => {
+      const deferredIds = new Set(s.deferredIds)
+      deferredIds.delete(entry.card.id)
+      return {
+        queue: [entry.card, ...s.queue.filter((c) => c.id !== entry.card.id)],
+        undoStack: s.undoStack.filter((u) => u.key !== entry.key),
+        counts: { ...s.counts, [entry.outcome]: Math.max(0, s.counts[entry.outcome] - 1) },
+        deferredIds,
+        exhausted: false,
+        shownAt: Date.now(),
+        toast: {
+          id: ++toastSeq,
+          kind: 'info',
+          message: `Undid: ${truncate(entry.card.file.name)}`,
+          undoable: false,
+        },
+      }
+    })
+    try {
+      const res = await enqueue(() => api.undo(sessionId, { steps: 1 }))
+      set((s) => ({ progress: res.progress, treeVersion: s.treeVersion + 1 }))
+    } catch (err) {
+      // Put things back the way they were.
+      set((s) => ({
+        queue: s.queue.filter((c) => c.id !== entry.card.id),
+        undoStack: [...s.undoStack, entry],
+        counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + 1 },
+        deferredIds: entry.outcome === 'deferred' ? new Set(s.deferredIds).add(entry.card.id) : s.deferredIds,
+        toast: { id: ++toastSeq, kind: 'error', message: `Undo failed: ${errMsg(err)}`, undoable: false },
+      }))
+    }
+  },
+
+  undoAll: async () => {
+    const { sessionId } = get()
+    if (sessionId === null) return
+    try {
+      const res = await enqueue(() => api.undo(sessionId, { steps: UNDO_ALL_STEPS }))
+      set((s) => ({
+        progress: res.progress,
+        treeVersion: s.treeVersion + 1,
+        queue: [],
+        undoStack: [],
+        counts: { moved: 0, trashed: 0, deferred: 0 },
+        deferredIds: new Set<string>(),
+        exhausted: false,
+        toast: { id: ++toastSeq, kind: 'info', message: 'Undid everything', undoable: false },
+      }))
+      await get().fetchMore()
+    } catch (err) {
+      set({ toast: { id: ++toastSeq, kind: 'error', message: `Undo failed: ${errMsg(err)}`, undoable: false } })
+    }
+  },
+
+  setProgress: (progress) => set({ progress }),
+  dismissToast: () => set({ toast: null }),
+  openPicker: () => set((s) => (s.queue.length ? { pickerOpen: true } : {})),
+  closePicker: () => set({ pickerOpen: false }),
+  togglePreview: () => set((s) => ({ previewOpen: s.queue.length ? !s.previewOpen : false })),
+}))
+
+function without(set: Set<string>, id: string): Set<string> {
+  const next = new Set(set)
+  next.delete(id)
+  return next
+}
+
+function truncate(name: string, n = 32): string {
+  return name.length > n ? `${name.slice(0, n - 1)}…` : name
+}
+
+function errMsg(e: unknown): string {
+  return e instanceof Error ? e.message : String(e)
+}
