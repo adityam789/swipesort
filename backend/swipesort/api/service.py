@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import json
+import os
 import threading
 from pathlib import Path, PurePosixPath
 
+from sqlalchemy import select as sa_select
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as DB
 from sqlmodel import col, select
@@ -371,7 +373,8 @@ class SessionService:
             path, url = Path(ixo.path), f"/api/indexed/{ixo.id}/preview"
         else:
             return None
-        if not path.exists() or (out_root / ".swipesort") in path.parents:
+        trash_prefix = str(out_root / ".swipesort") + os.sep
+        if str(path).startswith(trash_prefix) or not path.exists():
             return None
         if path.is_relative_to(out_root) and not (
                 in_root != out_root and path.is_relative_to(in_root)):
@@ -418,56 +421,75 @@ class SessionService:
             ).all()
 
             def key(f: File) -> tuple[int, str, str]:
-                p = PurePosixPath(f.rel_path)
-                return (1 if f.status == FileStatus.skipped else 0, str(p.parent).casefold(),
-                        p.name.casefold())
+                parent, _, name = f.rel_path.rpartition("/")  # strings: hot path
+                return (1 if f.status == FileStatus.skipped else 0, (parent or ".").casefold(),
+                        name.casefold())
 
-            dups: dict[int, Card] = {}
-            for sug in db.exec(select(Suggestion).where(
-                    Suggestion.session_id == sid, Suggestion.kind == "duplicate",
-                    col(Suggestion.stale).is_(False))).all():
-                f0 = next((f for f in files if f.id == sug.file_id), None)
-                if f0 is not None and f0.status == FileStatus.ready:
-                    card = self._dup_card(f0, sug, db, row)
-                    if card is not None:
-                        dups[sug.file_id] = card
-            latest: dict[int, Suggestion] = {}
-            for sug in db.exec(select(Suggestion).where(
-                    Suggestion.session_id == sid, Suggestion.kind == "classify")
-                    .order_by(col(Suggestion.id))).all():
-                latest[sug.file_id] = sug  # ascending id -> last write wins = newest
             root = Path(row.output_root)
             by_id = {f.id: f for f in files}
             ranked = sorted(files, key=key)
             rank = {f.id: i for i, f in enumerate(ranked)}
             # SPEC §2.3: duplicates first (cheapest wins), then batches, then individual cards.
-            items: list[BatchItem] = []
-            for f in ranked:
-                sg = latest.get(f.id or -1)
-                if (f.id is None or f.id in dups or f.status != FileStatus.ready or sg is None
-                        or not sg.batch_ok):
-                    continue
-                cands = json.loads(sg.candidates_json)
-                items.append(BatchItem(
-                    file_id=f.id, tier=sg.tier, confidence=sg.confidence,
-                    target_folder_id=cands[0]["folder_id"] if cands else None,
-                    stop_folder_id=sg.stop_folder_id, reached_leaf=sg.reached_leaf,
-                    rank=rank[f.id]))
-            batches: list[Card] = []
+            # Duplicate cards are built lazily (stat + lookups), only until the page is full.
+            dup_sugs = sorted(
+                (sg for sg in db.exec(select(Suggestion).where(
+                    Suggestion.session_id == sid, Suggestion.kind == "duplicate",
+                    col(Suggestion.stale).is_(False))).all()
+                 if sg.file_id in by_id and by_id[sg.file_id].status == FileStatus.ready),
+                key=lambda sg: rank[sg.file_id])
+            out: list[Card] = []
+            dup_ids: set[int] = {sg.file_id for sg in dup_sugs}
+            shown_dups: set[int] = set()
+            for sg in dup_sugs:
+                if len(out) >= limit:
+                    break
+                card = self._dup_card(by_id[sg.file_id], sg, db, row)
+                if card is None:
+                    dup_ids.discard(sg.file_id)  # other copy gone: classify normally
+                else:
+                    out.append(card)
+                    shown_dups.add(sg.file_id)
+            # Latest classify suggestion per file, as plain columns (no ORM objects: hot path)
+            latest: dict[int, tuple[int, str, float, int | None, bool, bool, str]] = {}
+            for sg_id, fid, tier, conf, stop, reached, ok, cj in db.execute(
+                    sa_select(col(Suggestion.id), col(Suggestion.file_id), col(Suggestion.tier),
+                              col(Suggestion.confidence), col(Suggestion.stop_folder_id),
+                              col(Suggestion.reached_leaf), col(Suggestion.batch_ok),
+                              col(Suggestion.candidates_json))
+                    .where(col(Suggestion.session_id) == sid, col(Suggestion.kind) == "classify")
+                    .order_by(col(Suggestion.id))).all():
+                latest[fid] = (sg_id, tier, conf, stop, reached, ok, cj)
             batched: set[int] = set()
-            for g in make_batches(items, self.settings.batch):
-                card = self._batch_card(g.kind, g.target_folder_id,
-                                        [by_id[i] for i in g.file_ids], g.min_confidence,
-                                        db, root)
-                if card is not None:
-                    batches.append(card)
-                    batched.update(g.file_ids)
-            singles = [f for f in ranked if f.id not in batched]
-            singles.sort(key=lambda f: 0 if f.id in dups else 1)  # stable: keeps card order
-            out: list[Card] = [dups[f.id] for f in singles if f.id in dups][:limit]
-            out += batches[: max(0, limit - len(out))]
-            rest = [f for f in singles if f.id not in dups][: max(0, limit - len(out))]
-            out += [self._card(f, sid, db, root, latest.get(f.id or -1)) for f in rest]
+            bcfg = self.settings.batch
+            if len(out) < limit and min(bcfg.min_size, bcfg.inbox_min_size) <= len(files):
+                items: list[BatchItem] = []
+                for f in ranked:
+                    lt = latest.get(f.id or -1)
+                    if (f.id is None or f.id in dup_ids or f.status != FileStatus.ready
+                            or lt is None or not lt[5]):
+                        continue
+                    _, tier, conf, stop, reached, _, cj = lt
+                    top = cj[cj.find('"folder_id": ') + 13:].split(",", 1)[0] if cj != "[]" else ""
+                    items.append(BatchItem(
+                        file_id=f.id, tier=tier, confidence=conf,
+                        target_folder_id=int(top) if top.strip().isdigit() else None,
+                        stop_folder_id=stop, reached_leaf=reached, rank=rank[f.id]))
+                for g in make_batches(items, bcfg):
+                    if len(out) >= limit:
+                        break
+                    card = self._batch_card(g.kind, g.target_folder_id,
+                                            [by_id[i] for i in g.file_ids], g.min_confidence,
+                                            db, root)
+                    if card is not None:
+                        out.append(card)
+                        batched.update(g.file_ids)
+            rest = [f for f in ranked if f.id not in dup_ids and f.id not in batched]
+            need = rest[: max(0, limit - len(out))]
+            if need:
+                sugs = {sg.file_id: sg for sg in db.exec(select(Suggestion).where(
+                    col(Suggestion.id).in_([latest[f.id][0] for f in need
+                                            if f.id in latest]))).all()}
+                out += [self._card(f, sid, db, root, sugs.get(f.id or -1)) for f in need]
             return out
 
     def _batch_card(self, kind: str, target_id: int, members: list[File], min_conf: float,
