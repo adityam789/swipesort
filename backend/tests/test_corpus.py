@@ -148,6 +148,9 @@ NON_NESTED_DIGESTS = {
 }
 
 
+@pytest.mark.skipif(sys.platform == "win32",
+                    reason="frozen digests were recorded on POSIX (text bytes differ by OS); "
+                           "same-seed determinism is tested on every OS")
 @pytest.mark.parametrize(("n", "seed", "hard"), sorted(NON_NESTED_DIGESTS))
 def test_non_nested_output_unchanged(tmp_path: Path, n: int, seed: int, hard: bool) -> None:
     generate(tmp_path / "c", n=n, seed=seed, hard=hard)
