@@ -1366,12 +1366,12 @@ class SessionService:
                         db.delete(ix)
                     # proposals made under this folder (the re-cluster after it was created)
                     # lose their parent: pending ones are withdrawn, history keeps no FK
-                    for pr in db.exec(select(Proposal).where(
+                    for orphan in db.exec(select(Proposal).where(
                             Proposal.parent_folder_id == fo.id)).all():
-                        if pr.status == "pending":
-                            pr.status = "withdrawn"
-                        pr.parent_folder_id = None
-                        db.add(pr)
+                        if orphan.status == "pending":
+                            orphan.status = "withdrawn"
+                        orphan.parent_folder_id = None
+                        db.add(orphan)
                     db.flush()
                     db.delete(fo)
                     db.flush()  # children before parents (self-referencing FK)
