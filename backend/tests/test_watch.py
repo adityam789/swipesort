@@ -225,7 +225,7 @@ def test_launchd_plist() -> None:
     assert agent.launchd_plist_path(Path("/Users/u")) == Path(
         "/Users/u/Library/LaunchAgents/com.swipesort.daemon.plist")
     assert agent.launchctl_bootstrap_args(501, Path("/p.plist")) == [
-        "launchctl", "bootstrap", "gui/501", "/p.plist"]
+        "launchctl", "bootstrap", "gui/501", str(Path("/p.plist"))]
     assert agent.launchctl_bootout_args(501) == [
         "launchctl", "bootout", "gui/501/com.swipesort.daemon"]
 
