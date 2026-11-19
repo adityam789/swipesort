@@ -14,6 +14,10 @@ import type {
   TreeNode,
   UndoIn,
   UndoOut,
+  WatchActivity,
+  WatchConfig,
+  WatchConfigIn,
+  WatchStatus,
 } from './types'
 
 export class ApiError extends Error {
@@ -74,6 +78,19 @@ export const api = {
   createFolder: (body: FolderCreate) => post<FolderOut>('/api/folders', body),
   browse: (path?: string) =>
     request<BrowseOut>(`/api/fs/browse?path=${encodeURIComponent(path ?? '')}`),
+  // watch mode (SPEC §18): desktop-only endpoints
+  getWatch: () => request<WatchConfig>('/api/watch'),
+  putWatch: (body: WatchConfigIn) =>
+    request<WatchConfig>('/api/watch', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    }),
+  watchStatus: () => request<WatchStatus>('/api/watch/status'),
+  watchActivity: (days?: number) =>
+    request<WatchActivity>(`/api/watch/activity${days ? `?days=${days}` : ''}`),
+  /** Targeted undo of one decision (an auto-move); 409 when later changes depend on it. */
+  undoDecision: (decisionId: number) => post<UndoOut>(`/api/decisions/${decisionId}/undo`, {}),
 }
 
 export const pairQrUrl = (code: string) => `/api/pair/qr.svg?code=${encodeURIComponent(code)}`

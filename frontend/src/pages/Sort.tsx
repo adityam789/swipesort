@@ -9,6 +9,7 @@ import { BottomSheet } from '../components/BottomSheet'
 import { FolderPicker } from '../components/FolderPicker'
 import { PairButton } from '../components/PairDialog'
 import { ToastHost } from '../components/Toast'
+import { WatchBadge } from '../components/WatchBadge'
 import { useFling } from '../gestures/useFling'
 import { useIsMobile } from '../gestures/useIsMobile'
 import { useSession } from '../store/session'
@@ -20,7 +21,17 @@ type Drawer = 'input' | 'output' | null
 
 const DEFER_EDGE: Edge = { label: 'Later', action: 'defer' }
 
-export function Sort({ sessionId, onNew, local = true }: { sessionId: number; onNew: () => void; local?: boolean }) {
+export function Sort({
+  sessionId,
+  onNew,
+  local = true,
+  onOpenSession,
+}: {
+  sessionId: number
+  onNew: () => void
+  local?: boolean
+  onOpenSession?: (id: number) => void
+}) {
   const qc = useQueryClient()
   const mobile = useIsMobile()
   const queue = useSession((s) => s.queue)
@@ -164,6 +175,7 @@ export function Sort({ sessionId, onNew, local = true }: { sessionId: number; on
               )}
             </p>
           </div>
+          {!mobile && local && onOpenSession && <WatchBadge onOpen={onOpenSession} className={btn} />}
           {!mobile && local && <PairButton className={btn} />}
           {!mobile && undoButton}
         </div>

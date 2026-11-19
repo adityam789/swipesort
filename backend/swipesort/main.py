@@ -21,6 +21,7 @@ from swipesort.db.session import make_engine
 from swipesort.ml.gateway import Provider
 from swipesort.ml.llm import LLM
 from swipesort.platform.base import Platform
+from swipesort.watch.service import WatchService
 
 FRONTEND_DIST = Path(__file__).resolve().parents[2] / "frontend" / "dist"
 # Must be revalidated on every load so a rebuilt PWA (new hashed assets) is picked up.
@@ -60,16 +61,25 @@ def create_app(
     engine = make_engine(db_path)
     pairing_mgr = pairing.PairingManager(engine, settings.server)
 
+    service = SessionService(engine, settings, platform, provider, llm)
+    watch = WatchService(service, home=home)
+
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         if settings.server.lan and settings.server.print_qr:
             code, _exp = pairing_mgr.start()
             pairing.print_pairing_qr(pairing.pair_url(settings, code, net.lan_ip()),
                                      settings.server.pair_code_ttl_s)
-        yield
+        if settings.watch.enabled:  # `serve --watch` / watch.enabled (SPEC §18)
+            watch.start()
+        try:
+            yield
+        finally:
+            watch.stop()
 
     app = FastAPI(title="SwipeSort", version="0.1.0", lifespan=lifespan)
-    app.state.service = SessionService(engine, settings, platform, provider, llm)
+    app.state.service = service
+    app.state.watch = watch
     app.state.pairing = pairing_mgr
     app.state.thumb_dir = home / "thumbs"
     app.add_middleware(pairing.AuthMiddleware, pairing=pairing_mgr, settings=settings.server)

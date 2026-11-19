@@ -30,9 +30,14 @@ from swipesort.api.schemas import (
     TreeNode,
     UndoIn,
     UndoOut,
+    WatchActivity,
+    WatchConfigIn,
+    WatchConfigOut,
+    WatchStatus,
 )
 from swipesort.api.service import BadRequest, NotFound, SessionService
 from swipesort.exec.errors import ExecError
+from swipesort.watch.service import WatchService
 
 router = APIRouter(prefix="/api")
 
@@ -124,6 +129,48 @@ def undo(sid: int, body: UndoIn, request: Request) -> UndoOut:
         return svc(request).undo(sid, max(1, body.steps))
     except Exception as e:
         raise _guard(e) from e
+
+
+@router.post("/decisions/{decision_id}/undo", response_model=UndoOut)
+def undo_decision(decision_id: int, request: Request) -> UndoOut:
+    """Targeted undo of one decision (watch mode's per-item Undo). 409 when later changes
+    depend on it (e.g. the file was moved again)."""
+    try:
+        return svc(request).undo_decision(decision_id)
+    except Exception as e:
+        raise _guard(e) from e
+
+
+# ---------- watch mode (SPEC §18): names filesystem paths -> desktop (loopback) only ----------
+def watch_svc(request: Request) -> WatchService:
+    w: WatchService = request.app.state.watch
+    return w
+
+
+@router.get("/watch", response_model=WatchConfigOut, dependencies=[Depends(require_local)])
+def get_watch(request: Request) -> WatchConfigOut:
+    return watch_svc(request).config()
+
+
+@router.put("/watch", response_model=WatchConfigOut, dependencies=[Depends(require_local)])
+def put_watch(body: WatchConfigIn, request: Request) -> WatchConfigOut:
+    try:
+        return watch_svc(request).update(body)
+    except Exception as e:
+        raise _guard(e) from e
+
+
+@router.get("/watch/status", response_model=WatchStatus, dependencies=[Depends(require_local)])
+def watch_status(request: Request) -> WatchStatus:
+    return watch_svc(request).status()
+
+
+@router.get("/watch/activity", response_model=WatchActivity,
+            dependencies=[Depends(require_local)])
+def watch_activity(request: Request, days: int | None = Query(None, ge=1, le=365)
+                   ) -> WatchActivity:
+    """The digest: auto-sorted items in the last `days` (default watch.digest_days)."""
+    return watch_svc(request).activity(days)
 
 
 @router.post("/folders", response_model=FolderOut)

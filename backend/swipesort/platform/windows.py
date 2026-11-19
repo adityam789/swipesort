@@ -2,11 +2,17 @@
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import os
 import stat
+import subprocess
+import sys
 from pathlib import Path
+from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
+from swipesort.platform import agent
 from swipesort.platform.base import SourceMetadata
 from swipesort.platform.fallback import FallbackPlatform
 
@@ -41,6 +47,47 @@ def parse_zone_identifier(text: str) -> SourceMetadata:
     return SourceMetadata(where_froms=urls)
 
 
+_GENERIC_READ = 0x80000000
+_OPEN_EXISTING = 3
+_FILE_FLAG_BACKUP_SEMANTICS = 0x02000000  # lets CreateFileW open directories too
+_SHARING_VIOLATION = (32, 33)  # ERROR_SHARING_VIOLATION, ERROR_LOCK_VIOLATION
+_SUBPROCESS_TIMEOUT = 15.0
+# Toasts need a registered AppUserModelID; PowerShell's own one always exists.
+APP_ID = r"{1AC14E77-02E7-4E5D-B744-2EB1AE5198B7}\WindowsPowerShell\v1.0\powershell.exe"
+
+
+def toast_script(title: str, body: str, undo_url: str | None) -> str:
+    """PowerShell for a basic WinRT toast (no extra modules). Clicking it opens `undo_url`
+    (the app's watch activity page, where Undo lives)."""
+    launch = (f' activationType="protocol" launch="{xml_escape(undo_url, {chr(34): "&quot;"})}"'
+              if undo_url else "")
+    xml = (f"<toast{launch}><visual><binding template=\"ToastGeneric\">"
+           f"<text>{xml_escape(title)}</text><text>{xml_escape(body)}</text>"
+           "</binding></visual></toast>")
+    ps_xml = xml.replace("'", "''")
+    return (
+        "[Windows.UI.Notifications.ToastNotificationManager, Windows.UI.Notifications, "
+        "ContentType = WindowsRuntime] | Out-Null; "
+        "[Windows.Data.Xml.Dom.XmlDocument, Windows.Data.Xml.Dom.XmlDocument, "
+        "ContentType = WindowsRuntime] | Out-Null; "
+        "$x = New-Object Windows.Data.Xml.Dom.XmlDocument; "
+        f"$x.LoadXml('{ps_xml}'); "
+        "$t = [Windows.UI.Notifications.ToastNotification]::new($x); "
+        "[Windows.UI.Notifications.ToastNotificationManager]::CreateToastNotifier("
+        f"'{APP_ID}').Show($t)"
+    )
+
+
+def _run(args: list[str]) -> bool:
+    try:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
+        proc = subprocess.run(args, capture_output=True, text=True, timeout=_SUBPROCESS_TIMEOUT,
+                              check=False, creationflags=flags)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0
+
+
 class WindowsPlatform(FallbackPlatform):
     name = "windows"
 
@@ -68,14 +115,31 @@ class WindowsPlatform(FallbackPlatform):
         return Path("\\\\?\\" + text)
 
     def is_locked(self, path: Path) -> bool:
-        flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
-        try:
-            fd = os.open(self.long_path(path), flags)
-        except PermissionError:
-            return True
-        except OSError:
+        """True while another process holds the file open without sharing (e.g. a browser
+        still writing a download): CreateFileW with share mode 0 fails with a sharing
+        violation. Read-only files are not "locked"."""
+        winDLL: Any = getattr(ctypes, "WinDLL", None)
+        if winDLL is None:  # not on Windows (tests): plain open probe
+            try:
+                fd = os.open(self.long_path(path), os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            except PermissionError:
+                return True
+            except OSError:
+                return False
+            os.close(fd)
             return False
-        os.close(fd)
+        k32 = winDLL("kernel32", use_last_error=True)
+        k32.CreateFileW.restype = ctypes.c_void_p
+        k32.CreateFileW.argtypes = [ctypes.c_wchar_p, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_void_p, ctypes.c_uint32, ctypes.c_uint32,
+                                    ctypes.c_void_p]
+        k32.CloseHandle.argtypes = [ctypes.c_void_p]
+        h = k32.CreateFileW(str(self.long_path(path)), _GENERIC_READ, 0, None, _OPEN_EXISTING,
+                            _FILE_FLAG_BACKUP_SEMANTICS, None)
+        if h is None or h == ctypes.c_void_p(-1).value:
+            get_err: Any = getattr(ctypes, "get_last_error", lambda: 0)
+            return int(get_err()) in _SHARING_VIOLATION
+        k32.CloseHandle(h)
         return False
 
     def _access_guidance(self, root: Path) -> str:
@@ -89,7 +153,9 @@ class WindowsPlatform(FallbackPlatform):
         try:
             from windows_toasts import Toast, WindowsToaster  # type: ignore[import-not-found,unused-ignore]
         except ImportError:
-            super().notify(title, body, undo_url)
+            if not _run(["powershell", "-NoProfile", "-NonInteractive", "-Command",
+                         toast_script(title, body, undo_url)]):
+                super().notify(title, body, undo_url)
             return
         try:
             toaster = WindowsToaster("SwipeSort")
@@ -98,3 +164,20 @@ class WindowsPlatform(FallbackPlatform):
         except Exception:
             log.debug("toast failed", exc_info=True)
             super().notify(title, body, undo_url)
+
+    # ---- background agent (Task Scheduler logon task) ----
+    def install_background_agent(self) -> bool:
+        python = sys.executable
+        pythonw = Path(python).with_name("pythonw.exe")  # no console window at logon
+        if pythonw.is_file():
+            python = str(pythonw)
+        ok = _run(agent.schtasks_create_args(python))
+        if ok:
+            _run(agent.schtasks_run_args())  # start now, not only at next logon
+        return ok
+
+    def uninstall_background_agent(self) -> bool:
+        return _run(agent.schtasks_delete_args())
+
+    def background_agent_status(self) -> str:
+        return "installed" if _run(agent.schtasks_query_args()) else "not installed"

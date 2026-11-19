@@ -75,3 +75,14 @@ def done_ops_for_undo(db: DBSession, session_id: int, steps: int) -> list[list[O
             by_decision[op.decision_id] = g
             groups.append(g)
     return groups[: max(steps, 0)]
+
+
+def done_ops_of_decision(db: DBSession, session_id: int, decision_id: int) -> list[Op]:
+    """Done ops of one decision, latest first (ready to be reversed LIFO)."""
+    stmt = (
+        select(Op)
+        .where(col(Op.session_id) == session_id, col(Op.decision_id) == decision_id,
+               col(Op.status) == OpStatus.done)
+        .order_by(col(Op.id).desc())
+    )
+    return list(db.exec(stmt))

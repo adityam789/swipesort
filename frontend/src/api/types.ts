@@ -45,6 +45,8 @@ export interface SessionOut {
   /** Pipeline running in this daemon run (false: left over from an earlier run). */
   live?: boolean
   created_at?: string | null
+  /** manual | watch (a watched folder's pending queue, SPEC §18). */
+  kind?: string
 }
 
 // Phone pairing (SPEC §12 POST /api/pair; backend api/pairing.py)
@@ -264,6 +266,7 @@ export type StreamEventType =
   | 'progress'
   | 'op_failed'
   | 'hello'
+  | 'auto_sorted'
 
 /** One JSON message on WS /api/sessions/{id}/stream. */
 export interface StreamEvent {
@@ -271,7 +274,83 @@ export interface StreamEvent {
   card?: Card | null // card_ready / card_updated
   card_id?: string | null // card_removed
   progress?: Progress | null // progress (also piggybacked on others)
-  message?: string // op_failed
+  message?: string // op_failed / auto_sorted
+  decision_id?: number | null // auto_sorted: POST /api/decisions/{id}/undo
 }
 
 export const DIRECTIONS: Direction[] = ['up', 'right', 'down', 'left']
+
+// Watch mode (SPEC §18; backend api/schemas.py "watch mode")
+export interface WatchFolderIn {
+  path: string
+  output: string
+  enabled?: boolean
+}
+
+export interface WatchFolderOut extends WatchFolderIn {
+  session_id: number | null
+  running: boolean
+  pending: number
+  processing: number
+  error: string
+}
+
+export interface WatchSafety {
+  decisions: number
+  min_decisions_for_auto: number
+  auto_unlocked: boolean
+}
+
+export interface WatchConfig {
+  enabled: boolean
+  running: boolean
+  folders: WatchFolderOut[]
+  settle_seconds: number
+  auto_move_threshold: number
+  auto_move: boolean
+  notify: boolean
+  auto_trash_exact_dupes: boolean
+  ignore: string[]
+  digest_days: number
+  safety: WatchSafety
+}
+
+export interface WatchConfigIn {
+  enabled?: boolean
+  folders?: WatchFolderIn[]
+  auto_move?: boolean
+  notify?: boolean
+  auto_trash_exact_dupes?: boolean
+}
+
+export interface WatchStatus {
+  enabled: boolean
+  running: boolean
+  pending_total: number
+  folders: WatchFolderOut[]
+  safety: WatchSafety
+}
+
+export interface WatchActivityItem {
+  decision_id: number
+  session_id: number
+  file_id: number | null
+  name: string
+  action: 'move' | 'trash'
+  src: string
+  dst: string
+  dest_rel: string
+  confidence: number | null
+  ts: string
+  undone: boolean
+  can_undo: boolean
+  undo_blocked: string
+}
+
+export interface WatchActivity {
+  days: number
+  items: WatchActivityItem[]
+  auto_moved: number
+  auto_trashed: number
+  pending_total: number
+}

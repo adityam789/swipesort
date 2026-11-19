@@ -140,3 +140,29 @@ def list_dirs(root: Path, settings: Scan, platform: Platform) -> list[Path]:
             stack.append(p)
     out.sort(key=lambda p: p.relative_to(root).as_posix())
     return out
+
+
+def scan_entry(entry: Path, root: Path, settings: Scan, platform: Platform) -> list[ScanItem]:
+    """Scan one top-level entry of `root` (watch mode): a file, a bundle (one item), or a
+    plain folder (its files and bundles, recursively). rel_paths are relative to `root`."""
+    try:
+        if entry.is_symlink() or _skipped(entry.name, entry, settings, platform):
+            return []
+        rel = entry.relative_to(root).as_posix()
+        if entry.is_file():
+            st = entry.stat()
+            return [ScanItem(path=entry, rel_path=rel, is_bundle=False, size=st.st_size,
+                             mtime=st.st_mtime, ext=entry.suffix.lower().lstrip("."))]
+        if not entry.is_dir():
+            return []
+        sub = _entries(entry)
+        if sub is None:
+            return []
+        if _is_bundle(entry, {s.name for s in sub}, settings):
+            size, mtime = _bundle_stats(entry)
+            return [ScanItem(path=entry, rel_path=rel, is_bundle=True, size=size, mtime=mtime,
+                             ext="")]
+    except OSError:
+        return []
+    return [i.model_copy(update={"rel_path": f"{rel}/{i.rel_path}"})
+            for i in scan(entry, settings, platform)]

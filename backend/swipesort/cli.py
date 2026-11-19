@@ -19,6 +19,8 @@ def _root() -> None:
 def serve(dev: bool = typer.Option(False, "--dev", help="auto-reload"),
           lan: bool = typer.Option(False, "--lan",
                                    help="listen on the LAN so a paired phone can connect"),
+          watch: bool = typer.Option(False, "--watch",
+                                     help="start watching the configured folders (SPEC §18)"),
           host: str | None = None, port: int | None = None) -> None:
     """Run the local daemon (serves the API and the built PWA).
 
@@ -31,6 +33,9 @@ def serve(dev: bool = typer.Option(False, "--dev", help="auto-reload"),
     if port is not None:
         os.environ["SWIPESORT_PORT"] = str(port)
     os.environ["SWIPESORT_LAN"] = "1" if lan else "0"  # for uvicorn's reload child process
+    if watch:
+        os.environ["SWIPESORT_WATCH"] = "1"
+        settings.watch.enabled = True
     s.lan, s.port = lan, port or s.port  # this process (create_app reads the singleton)
     bind = host or (s.lan_host if lan else s.host)
     if lan:
@@ -79,6 +84,39 @@ def purge(session_id: int, older_than_days: int | None = None) -> None:
             raise typer.BadParameter(f"no session {session_id}")
         ex = Executor(eng, session_id, Path(row.input_root), Path(row.output_root))
         typer.echo(f"purged {ex.purge_trash(older_than_days)} item(s)")
+
+
+agent_app = typer.Typer(help="Background agent: keep the daemon (watch mode) running at login")
+app.add_typer(agent_app, name="agent")
+
+
+@agent_app.command("install")
+def agent_install() -> None:
+    """macOS: LaunchAgent (launchd). Windows: Task Scheduler logon task."""
+    from swipesort.platform import get_platform
+
+    p = get_platform()
+    if p.install_background_agent():
+        typer.echo(f"Installed: SwipeSort starts at login in watch mode ({p.name}).")
+    else:
+        typer.echo(f"Could not install a background agent on {p.name}; run "
+                   "`swipesort serve --watch` yourself.", err=True)
+        raise typer.Exit(1)
+
+
+@agent_app.command("uninstall")
+def agent_uninstall() -> None:
+    from swipesort.platform import get_platform
+
+    removed = get_platform().uninstall_background_agent()
+    typer.echo("Removed." if removed else "No background agent was installed.")
+
+
+@agent_app.command("status")
+def agent_status() -> None:
+    from swipesort.platform import get_platform
+
+    typer.echo(get_platform().background_agent_status())
 
 
 if __name__ == "__main__":

@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from sqlalchemy import select as sa_select
@@ -54,7 +55,7 @@ from swipesort.exec.names import sanitize_name
 from swipesort.ml import get_provider
 from swipesort.ml.gateway import Provider
 from swipesort.ml.llm import LLM
-from swipesort.pipeline.scanner import list_dirs, scan
+from swipesort.pipeline.scanner import ScanItem, list_dirs, scan
 from swipesort.pipeline.worker import SessionPipeline, Vec
 from swipesort.platform import get_platform
 from swipesort.platform.base import Platform
@@ -62,6 +63,8 @@ from swipesort.platform.base import Platform
 REMAINING = (FileStatus.queued, FileStatus.ready, FileStatus.skipped)
 SHOWABLE = (FileStatus.ready, FileStatus.skipped)
 INBOX_NAME = "_Inbox"
+# not a placement judgement: excluded from the auto-move safety count (SPEC §18)
+USER_DECISION_SKIP = ("mkdir", "defer", "review", "proposal_dismiss")
 PROPOSAL_ACTIONS = ("proposal_accept", "proposal_inbox", "proposal_dismiss", "taxonomy_accept")
 
 
@@ -128,7 +131,7 @@ class SessionService:
         return SessionOut(
             id=row.id, input_root=row.input_root, output_root=row.output_root,
             status=row.status, progress=self._progress(db, row.id),
-            live=row.id in self.pipelines, created_at=row.created_at,
+            live=row.id in self.pipelines, created_at=row.created_at, kind=row.kind,
         )
 
     def _add_folder(self, db: DB, sid: int, path: Path, root: Path, created_by: str) -> Folder:
@@ -185,12 +188,120 @@ class SessionService:
             db.commit()
             db.refresh(row)
             out_model = self._session_out(db, row)
+        self._start_pipeline(sid)
+        return out_model
+
+    def _start_pipeline(self, sid: int, persistent: bool = False,
+                        on_scored: Callable[[list[int]], None] | None = None) -> SessionPipeline:
         pipe = SessionPipeline(self.engine, self.settings, self.platform, self.provider, sid,
-                               llm=self.llm)
+                               llm=self.llm, persistent=persistent)
         pipe.notify = lambda kind, ids, sid=sid: self._on_pipeline(sid, kind, ids)
+        pipe.on_scored = on_scored
         self.pipelines[sid] = pipe
         pipe.start()
-        return out_model
+        return pipe
+
+    # ---------- watch sessions (SPEC §18) ----------
+    def open_watch_session(self, input_root: str, output_root: str,
+                           on_scored: Callable[[list[int]], None] | None = None) -> int:
+        """The long-lived session of one watched folder + output tree: created once, reused
+        across daemon restarts (its folder list is re-synced with the output tree). Unlike a
+        manual session, files already in the watched folder are not added: only new arrivals
+        (add_files). Its pipeline stays up for incremental work."""
+        inp, out = Path(input_root).expanduser(), Path(output_root).expanduser()
+        for p in (inp, out):
+            if not p.is_absolute():
+                raise BadRequest(f"path must be absolute: {p}")
+            if p.is_symlink() or not p.is_dir():
+                raise BadRequest(f"not a directory: {p}")
+            rep = self.platform.check_access(p)
+            if not rep.ok:
+                raise BadRequest(rep.message or f"cannot access {p}")
+        inp, out = inp.resolve(), out.resolve()
+        if inp == out:
+            raise BadRequest("the watched folder and its output tree must differ")
+        with DB(self.engine) as db:
+            row = db.exec(select(SessionRow).where(
+                SessionRow.kind == "watch", SessionRow.status == "active",
+                SessionRow.input_root == str(inp), SessionRow.output_root == str(out))).first()
+            if row is None:
+                row = SessionRow(input_root=str(inp), output_root=str(out), kind="watch")
+                db.add(row)
+                db.flush()
+                assert row.id is not None
+                self._add_folder(db, row.id, out, out, "existing")
+            assert row.id is not None
+            sid = row.id
+            known = {f.path for f in db.exec(select(Folder).where(Folder.session_id == sid))}
+            for d in list_dirs(out, self.settings.scan, self.platform):
+                # a watched folder nested in its output tree is never a destination
+                if str(d) not in known and not (inp.is_relative_to(out) and d.is_relative_to(inp)):
+                    self._add_folder(db, sid, d, out, "existing")
+            db.commit()
+        if sid not in self.pipelines:
+            self._start_pipeline(sid, persistent=True, on_scored=on_scored)
+        else:
+            self.pipelines[sid].on_scored = on_scored
+        return sid
+
+    def add_files(self, sid: int, items: list[ScanItem]) -> list[int]:
+        """Add newly arrived files (or bundles) to a live session and queue them in its
+        pipeline. Paths the session already tracks (e.g. a file an undo just restored) are
+        skipped."""
+        ids: list[int] = []
+        with self._lock(sid), DB(self.engine) as db:
+            row = self._session(db, sid)
+            inp = Path(row.input_root)
+            for item in items:
+                if not item.path.is_relative_to(inp):
+                    continue
+                dup = db.exec(select(File.id).where(
+                    File.session_id == sid, File.path == str(item.path),
+                    col(File.status) != FileStatus.decided)).first()
+                if dup is not None:
+                    continue
+                f = File(session_id=sid, path=str(item.path), rel_path=item.rel_path,
+                         is_bundle=item.is_bundle, size=item.size, mtime=item.mtime,
+                         ext=item.ext, status=FileStatus.queued)
+                db.add(f)
+                db.flush()
+                assert f.id is not None
+                ids.append(f.id)
+            db.commit()
+        pipe = self.pipelines.get(sid)
+        if pipe is not None and ids:
+            pipe.add_files(ids)
+        if ids:
+            self.publish(sid, "progress")
+        return ids
+
+    def known_paths(self, sid: int) -> set[str]:
+        """Paths of the session's files that are still in the watched folder."""
+        with DB(self.engine) as db:
+            return {p for p in db.exec(select(File.path).where(
+                File.session_id == sid, col(File.status) != FileStatus.decided)).all()}
+
+    def user_decision_count(self) -> int:
+        """Decisions the user made (all sessions; undone and automatic ones excluded), counted
+        per file for batch/proposal decisions. Gates watch mode's auto actions (SPEC §18)."""
+        n = 0
+        with DB(self.engine) as db:
+            for action, file_id, payload in db.execute(
+                    sa_select(col(Decision.action), col(Decision.file_id),
+                              col(Decision.payload_json))
+                    .where(col(Decision.undone).is_(False), col(Decision.source) == "user")):
+                if action in USER_DECISION_SKIP:
+                    continue
+                if payload and action not in ("keep_both", "keep_this"):
+                    try:
+                        members = json.loads(payload).get("members")
+                    except ValueError:
+                        members = None
+                    if isinstance(members, list):
+                        n += len(members)
+                        continue
+                n += 1 if file_id is not None or payload else 0
+        return n
 
     def list_sessions(self) -> list[SessionOut]:
         with DB(self.engine) as db:
@@ -573,7 +684,8 @@ class SessionService:
             db.refresh(fo)
         return fo
 
-    def decide(self, card_id: str, body: DecideIn) -> DecideOut:
+    def decide(self, card_id: str, body: DecideIn, source: str = "user") -> DecideOut:
+        """`source` is "auto" for watch mode's automatic moves (SPEC §18)."""
         if card_id[:1] == "b":
             return self.decide_batch(card_id, body)
         if card_id[:1] == "p" and card_id[1:].isdigit():
@@ -593,7 +705,8 @@ class SessionService:
             if f.status not in SHOWABLE:
                 raise BadRequest("card not ready or already decided")
             dec = Decision(session_id=sid, file_id=fid, action=body.action,
-                           target_folder_id=body.target_folder_id, latency_ms=body.latency_ms)
+                           target_folder_id=body.target_folder_id, latency_ms=body.latency_ms,
+                           source=source)
             db.add(dec)
             db.commit()
             db.refresh(dec)
@@ -612,7 +725,8 @@ class SessionService:
                 folder.n_files += 1
                 db.add(folder)
                 assert folder.id is not None
-                self._last_target[sid] = folder.id
+                if source == "user":
+                    self._last_target[sid] = folder.id
                 db.add(IndexedFile(session_id=sid, folder_id=folder.id, path=str(final),
                                    name=final.name, ext=f.ext, content_hash=f.content_hash,
                                    file_id=fid))
@@ -1158,88 +1272,140 @@ class SessionService:
                 ops = db.exec(
                     select(Op).where(Op.decision_id == dec.id, Op.status == OpStatus.done)
                 ).all()
+                ids: list[int] = []
                 if ops:
                     ids = ex.undo(1)
                     undone_ops.extend(ids)
-                    for op in db.exec(select(Op).where(col(Op.id).in_(ids))
-                                      .order_by(col(Op.id).desc())).all():
-                        if op.type == OpType.trash:
-                            for oix in db.exec(select(IndexedFile).where(
-                                    IndexedFile.session_id == sid,
-                                    IndexedFile.path == op.dst)).all():
-                                oix.path = op.src
-                                db.add(oix)
-                        if op.type in (OpType.move, OpType.trash):
-                            f = db.exec(select(File).where(
-                                File.session_id == sid, File.path == op.dst)).first()
-                            if f is not None:
-                                assert f.id is not None
-                                f.path = op.src
-                                f.status = FileStatus.ready
-                                db.add(f)
-                                for ix in db.exec(select(IndexedFile).where(
-                                        IndexedFile.session_id == sid,
-                                        IndexedFile.path == op.dst)).all():
-                                    pipe = self.pipelines.get(sid)
-                                    if pipe is not None:
-                                        pipe.on_unplaced(f.id, ix.folder_id, op.dst)
-                                    db.delete(ix)
-                        elif op.type == OpType.mkdir:
-                            for fo in db.exec(select(Folder).where(
-                                    Folder.session_id == sid, Folder.path == op.dst)).all():
-                                pipe = self.pipelines.get(sid)
-                                if pipe is not None and fo.id is not None:
-                                    pipe.on_folder_removed(fo.id)
-                                if self._last_target.get(sid) == fo.id:
-                                    self._last_target.pop(sid, None)
-                                for ix in db.exec(select(IndexedFile).where(
-                                        IndexedFile.folder_id == fo.id)).all():
-                                    db.delete(ix)
-                                db.flush()
-                                db.delete(fo)
-                                db.flush()  # children before parents (self-referencing FK)
-                if dec.action == "pick" and dec.target_folder_id is not None:
-                    tgt = db.get(Folder, dec.target_folder_id)
-                    if tgt is not None:
-                        tgt.n_files = max(0, tgt.n_files - 1)
-                        db.add(tgt)
-                if dec.action in ("review", "reject_all") and dec.payload_json:
-                    pl = json.loads(dec.payload_json)
-                    for mid in pl.get("members", []):
-                        sg = db.exec(select(Suggestion).where(
-                            Suggestion.file_id == mid, Suggestion.kind == "classify")
-                            .order_by(col(Suggestion.id).desc())).first()
-                        if sg is not None:
-                            sg.batch_ok = True
-                            sg.tier = pl.get("tiers", {}).get(str(mid), sg.tier)
-                            db.add(sg)
-                if dec.action in ("keep_both", "keep_this") and dec.suggestion_id is not None:
-                    dsug = db.get(Suggestion, dec.suggestion_id)
-                    if dsug is not None:
-                        dsug.stale = False
-                        db.add(dsug)
-                if dec.action in PROPOSAL_ACTIONS and dec.payload_json:
-                    pl = json.loads(dec.payload_json)
-                    pr = db.get(Proposal, pl.get("proposal_id", -1))
-                    if pr is not None:
-                        pr.status = "pending"  # the card comes back
-                        db.add(pr)
-                    for fid in pl.get("was_decided", []):  # members that came from an _Inbox
-                        wf = db.get(File, fid)
-                        if wf is not None:
-                            wf.status = FileStatus.decided
-                            db.add(wf)
-                if dec.action == "defer" and dec.file_id is not None:
-                    f = db.get(File, dec.file_id)
-                    if f is not None and f.status == FileStatus.skipped:
-                        f.status = FileStatus.ready
-                        db.add(f)
-                dec.undone = True
-                db.add(dec)
-                db.commit()
+                self._undo_bookkeeping(db, sid, dec, ids)
             out = UndoOut(undone_ops=undone_ops, progress=self._progress(db, sid))
         self.publish(sid, "tree_changed")
         return out
+
+    def undo_decision(self, decision_id: int) -> UndoOut:
+        """Targeted undo of one decision, out of LIFO order (watch mode: "Undo" on one
+        auto-move). Refused (ExecError -> 409) when later changes depend on it."""
+        with DB(self.engine) as db:
+            dec0 = db.get(Decision, decision_id)
+            if dec0 is None:
+                raise NotFound(f"decision {decision_id}")
+            sid = dec0.session_id
+        with self._lock(sid), DB(self.engine) as db:
+            dec = db.get(Decision, decision_id)
+            assert dec is not None
+            if dec.undone:
+                raise BadRequest("already undone")
+            row = self._session(db, sid)
+            ids = self._executor(row).undo_decision(decision_id)
+            self._undo_bookkeeping(db, sid, dec, ids)
+            out = UndoOut(undone_ops=ids, progress=self._progress(db, sid))
+        self.publish(sid, "tree_changed")
+        for fid in self._restored_files(ids):
+            card = self.card_for(fid)
+            if card is not None:
+                self.publish(sid, "card_ready", card=card)
+        return out
+
+    def undo_conflict(self, decision_id: int) -> str | None:
+        with DB(self.engine) as db:
+            dec = db.get(Decision, decision_id)
+            if dec is None:
+                return "unknown decision"
+            if dec.undone:
+                return "already undone"
+            row = self._session(db, dec.session_id)
+            return self._executor(row).undo_conflict(decision_id)
+
+    def _restored_files(self, op_ids: list[int]) -> list[int]:
+        if not op_ids:
+            return []
+        with DB(self.engine) as db:
+            out: list[int] = []
+            for op in db.exec(select(Op).where(col(Op.id).in_(op_ids))).all():
+                if op.type in (OpType.move, OpType.trash):
+                    f = db.exec(select(File).where(File.session_id == op.session_id,
+                                                   File.path == op.src)).first()
+                    if f is not None and f.id is not None:
+                        out.append(f.id)
+            return out
+
+    def _undo_bookkeeping(self, db: DB, sid: int, dec: Decision, ids: list[int]) -> None:
+        """Bring the DB in line after the executor reversed `ids` (ops of decision `dec`)."""
+        for op in db.exec(select(Op).where(col(Op.id).in_(ids))
+                          .order_by(col(Op.id).desc())).all():
+            if op.type == OpType.trash:
+                for oix in db.exec(select(IndexedFile).where(
+                        IndexedFile.session_id == sid,
+                        IndexedFile.path == op.dst)).all():
+                    oix.path = op.src
+                    db.add(oix)
+            if op.type in (OpType.move, OpType.trash):
+                f = db.exec(select(File).where(
+                    File.session_id == sid, File.path == op.dst)).first()
+                if f is not None:
+                    assert f.id is not None
+                    f.path = op.src
+                    f.status = FileStatus.ready
+                    db.add(f)
+                    for ix in db.exec(select(IndexedFile).where(
+                            IndexedFile.session_id == sid,
+                            IndexedFile.path == op.dst)).all():
+                        pipe = self.pipelines.get(sid)
+                        if pipe is not None:
+                            pipe.on_unplaced(f.id, ix.folder_id, op.dst)
+                        db.delete(ix)
+            elif op.type == OpType.mkdir:
+                for fo in db.exec(select(Folder).where(
+                        Folder.session_id == sid, Folder.path == op.dst)).all():
+                    pipe = self.pipelines.get(sid)
+                    if pipe is not None and fo.id is not None:
+                        pipe.on_folder_removed(fo.id)
+                    if self._last_target.get(sid) == fo.id:
+                        self._last_target.pop(sid, None)
+                    for ix in db.exec(select(IndexedFile).where(
+                            IndexedFile.folder_id == fo.id)).all():
+                        db.delete(ix)
+                    db.flush()
+                    db.delete(fo)
+                    db.flush()  # children before parents (self-referencing FK)
+        if dec.action == "pick" and dec.target_folder_id is not None:
+            tgt = db.get(Folder, dec.target_folder_id)
+            if tgt is not None:
+                tgt.n_files = max(0, tgt.n_files - 1)
+                db.add(tgt)
+        if dec.action in ("review", "reject_all") and dec.payload_json:
+            pl = json.loads(dec.payload_json)
+            for mid in pl.get("members", []):
+                sg = db.exec(select(Suggestion).where(
+                    Suggestion.file_id == mid, Suggestion.kind == "classify")
+                    .order_by(col(Suggestion.id).desc())).first()
+                if sg is not None:
+                    sg.batch_ok = True
+                    sg.tier = pl.get("tiers", {}).get(str(mid), sg.tier)
+                    db.add(sg)
+        if dec.action in ("keep_both", "keep_this") and dec.suggestion_id is not None:
+            dsug = db.get(Suggestion, dec.suggestion_id)
+            if dsug is not None:
+                dsug.stale = False
+                db.add(dsug)
+        if dec.action in PROPOSAL_ACTIONS and dec.payload_json:
+            pl = json.loads(dec.payload_json)
+            pr = db.get(Proposal, pl.get("proposal_id", -1))
+            if pr is not None:
+                pr.status = "pending"  # the card comes back
+                db.add(pr)
+            for fid in pl.get("was_decided", []):  # members that came from an _Inbox
+                wf = db.get(File, fid)
+                if wf is not None:
+                    wf.status = FileStatus.decided
+                    db.add(wf)
+        if dec.action == "defer" and dec.file_id is not None:
+            f = db.get(File, dec.file_id)
+            if f is not None and f.status == FileStatus.skipped:
+                f.status = FileStatus.ready
+                db.add(f)
+        dec.undone = True
+        db.add(dec)
+        db.commit()
 
     # ---------- trees ----------
     def tree(self, sid: int, side: str) -> TreeNode:

@@ -78,7 +78,13 @@ class FallbackPlatform:
         log.info("notify: %s - %s%s", title, body, f" (undo: {undo_url})" if undo_url else "")
 
     def install_background_agent(self) -> bool:
-        return False  # manual `swipesort serve`
+        return False  # manual `swipesort serve --watch`
+
+    def uninstall_background_agent(self) -> bool:
+        return False
+
+    def background_agent_status(self) -> str:
+        return "unsupported"
 
     def long_path(self, path: Path) -> Path:
         return path

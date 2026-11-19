@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
-import { render, screen, waitFor } from '@testing-library/react'
+import { fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionOut } from './api/types'
 
@@ -14,6 +14,9 @@ vi.mock('./api/client', async () => {
       getCards: vi.fn(() => Promise.resolve([])),
       getSession: vi.fn(),
       getFolders: vi.fn(() => Promise.resolve([])),
+      getWatch: vi.fn(),
+      watchStatus: vi.fn(),
+      watchActivity: vi.fn(),
     },
     fetchPreview: () => Promise.resolve(null),
     prefetchPreview: vi.fn(),
@@ -73,5 +76,26 @@ describe('app routing', () => {
     status.mockResolvedValue({ local: false, paired: false, lan: true, device_id: null })
     window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
     expect(await screen.findByLabelText('Pairing code')).toBeInTheDocument()
+  })
+
+  it('desktop: the watch badge opens the watched folder\'s session; /watch shows settings', async () => {
+    vi.mocked(api.pairStatus).mockResolvedValue({ local: true, paired: true, lan: false, device_id: null })
+    vi.mocked(api.listSessions).mockResolvedValue([])
+    const folders = [{ path: '/d', output: '/o', enabled: true, session_id: 3, running: true, pending: 2, processing: 0, error: '' }]
+    const safety = { decisions: 60, min_decisions_for_auto: 50, auto_unlocked: true }
+    vi.mocked(api.watchStatus).mockResolvedValue({ enabled: true, running: true, pending_total: 2, folders, safety })
+    vi.mocked(api.getWatch).mockResolvedValue({
+      enabled: true, running: true, folders, settle_seconds: 5, auto_move_threshold: 0.97, auto_move: true,
+      notify: true, auto_trash_exact_dupes: false, ignore: ['*.part'], digest_days: 7, safety,
+    })
+    vi.mocked(api.watchActivity).mockResolvedValue({ days: 7, items: [], auto_moved: 0, auto_trashed: 0, pending_total: 2 })
+    ui()
+    fireEvent.click(await screen.findByRole('button', { name: 'Watch folders' }))
+    expect(window.location.pathname).toBe('/watch')
+    expect(await screen.findByText('d → o')).toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Back' }))
+    fireEvent.click(await screen.findByTestId('watch-badge'))
+    await waitFor(() => expect(useSession.getState().sessionId).toBe(3))
+    expect(api.getSession).toHaveBeenCalledWith(3)
   })
 })

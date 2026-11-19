@@ -39,6 +39,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from blake3 import blake3
+from sqlalchemy import or_
 from sqlalchemy.engine import Engine
 from sqlmodel import Session as DBSession
 from sqlmodel import col, select
@@ -51,6 +52,7 @@ from swipesort.exec.errors import (
     LockedFileError,
     OutsideRootsError,
     SymlinkError,
+    UndoConflictError,
 )
 from swipesort.exec.names import is_within, resolve_collision, sanitize_name
 from swipesort.platform.base import Platform
@@ -317,6 +319,47 @@ class Executor:
 
     def undo_all(self) -> list[int]:
         return self.undo(2**62)
+
+    def undo_conflict(self, decision_id: int) -> str | None:
+        """Why the ops of one decision can't be reversed out of order, or None if they can.
+        A later op depends on it when it moved/trashed the file (or something inside the
+        bundle) this decision placed, or put anything into a folder this decision created.
+        Checked across all sessions: another session may share the output tree."""
+        with DBSession(self.engine) as db:
+            ops = journal.done_ops_of_decision(db, self.session_id, decision_id)
+            if not ops:
+                return "nothing to undo"
+            first = min(o.id or 0 for o in ops)
+            later = db.exec(select(Op).where(
+                col(Op.id) > first, col(Op.status) == OpStatus.done,
+                or_(col(Op.decision_id).is_(None), col(Op.decision_id) != decision_id))).all()
+            for op in ops:
+                dst = Path(op.dst)
+                if op.type in (OpType.move, OpType.trash):
+                    for lo in later:
+                        if (lo.id or 0) > (op.id or 0) and lo.src and is_within(Path(lo.src), dst):
+                            return f"{dst.name} was moved again after this"
+                    if not os.path.lexists(self._lp(dst)):
+                        return f"{dst.name} is no longer where it was moved"
+                elif op.type == OpType.mkdir:
+                    for lo in later:
+                        if ((lo.id or 0) > (op.id or 0) and lo.dst and Path(lo.dst) != dst
+                                and is_within(Path(lo.dst), dst)):
+                            return f"{dst.name}/ was used by a later change"
+        return None
+
+    def undo_decision(self, decision_id: int) -> list[int]:
+        """Targeted undo (watch mode's per-item Undo): reverse just this decision's ops, LIFO.
+        Refuses (UndoConflictError) when later ops depend on them; see undo_conflict()."""
+        why = self.undo_conflict(decision_id)
+        if why is not None:
+            raise UndoConflictError(why)
+        undone: list[int] = []
+        with DBSession(self.engine) as db:
+            for op in journal.done_ops_of_decision(db, self.session_id, decision_id):
+                if self._undo_op(db, op) and op.id is not None:
+                    undone.append(op.id)
+        return undone
 
     def _undo_op(self, db: DBSession, op: Op) -> bool:
         if op.type == OpType.mkdir:

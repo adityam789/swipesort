@@ -17,3 +17,7 @@ class SymlinkError(ExecError):
 
 class LockedFileError(ExecError):
     """The file is locked by another process; retries were exhausted. Never forced."""
+
+
+class UndoConflictError(ExecError):
+    """A targeted undo was refused: later operations depend on the ones it would reverse."""

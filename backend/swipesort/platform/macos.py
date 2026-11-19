@@ -2,14 +2,19 @@
 
 from __future__ import annotations
 
+import importlib
 import logging
+import os
 import re
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
+from typing import Any
 
+from swipesort.platform import agent
 from swipesort.platform.base import SourceMetadata
 from swipesort.platform.fallback import FallbackPlatform
 
@@ -48,6 +53,29 @@ def parse_mdls_list(raw: str) -> list[str]:
 def _mdls(path: Path, attr: str) -> list[str]:
     out = _run(["mdls", "-raw", "-name", attr, str(path)])
     return parse_mdls_list(out) if out else []
+
+
+def _osa_escape(s: str) -> str:
+    return s.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def notify_command(title: str, body: str, undo_url: str | None,
+                   terminal_notifier: str | None) -> list[str]:
+    """`terminal-notifier` (if installed) can open the undo page when clicked; plain
+    `osascript display notification` can't carry an action, so Undo lives in the app's
+    watch activity list either way."""
+    if terminal_notifier:
+        cmd = [terminal_notifier, "-title", title, "-message", body, "-group", "swipesort"]
+        if undo_url:
+            cmd += ["-open", undo_url]
+        return cmd
+    return ["osascript", "-e",
+            f'display notification "{_osa_escape(body)}" with title "{_osa_escape(title)}"']
+
+
+def _uid() -> int:
+    getuid = getattr(os, "getuid", None)
+    return int(getuid()) if getuid is not None else 0
 
 
 class MacOSPlatform(FallbackPlatform):
@@ -92,9 +120,60 @@ class MacOSPlatform(FallbackPlatform):
         )
 
     def notify(self, title: str, body: str, undo_url: str | None = None) -> None:
-        def esc(s: str) -> str:
-            return s.replace("\\", "\\\\").replace('"', '\\"')
-
-        script = f'display notification "{esc(body)}" with title "{esc(title)}"'
-        if _run(["osascript", "-e", script]) is None:
+        tn = shutil.which("terminal-notifier") if undo_url else None
+        if _run(notify_command(title, body, undo_url, tn)) is None:
             super().notify(title, body, undo_url)
+
+    def is_locked(self, path: Path) -> bool:
+        """Best effort: another process holds an flock/O_EXLOCK on the file. Browsers on macOS
+        don't lock downloads, so settling relies on stable size/mtime + partial-name patterns."""
+        # POSIX only; imported dynamically so this module imports (and type-checks) on Windows
+        fcntl: Any = importlib.import_module("fcntl")
+
+        try:
+            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+        except PermissionError:
+            return True
+        except OSError:
+            return False
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError:
+            return True
+        except OSError:
+            return False
+        else:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            return False
+        finally:
+            os.close(fd)
+
+    # ---- background agent (LaunchAgent) ----
+    def _plist(self) -> Path:
+        return agent.launchd_plist_path(Path.home())
+
+    def install_background_agent(self) -> bool:
+        from swipesort.config import app_dir
+
+        logs = app_dir() / "logs"
+        logs.mkdir(parents=True, exist_ok=True)
+        plist = self._plist()
+        plist.parent.mkdir(parents=True, exist_ok=True)
+        plist.write_bytes(agent.launchd_plist(sys.executable, logs, app_dir()))
+        uid = _uid()
+        _run(agent.launchctl_bootout_args(uid))  # reload if it was already loaded
+        return _run(agent.launchctl_bootstrap_args(uid, plist)) is not None
+
+    def uninstall_background_agent(self) -> bool:
+        _run(agent.launchctl_bootout_args(_uid()))
+        plist = self._plist()
+        if plist.is_file():
+            plist.unlink()  # our own config file, not user data
+            return True
+        return False
+
+    def background_agent_status(self) -> str:
+        if not self._plist().is_file():
+            return "not installed"
+        loaded = _run(agent.launchctl_print_args(_uid())) is not None
+        return "installed (running)" if loaded else "installed (not loaded)"

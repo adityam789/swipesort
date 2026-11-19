@@ -261,6 +261,9 @@ export const useSession = create<SessionState>()((set, get) => ({
       case 'op_failed':
         set({ toast: { id: ++toastSeq, kind: 'error', message: ev.message || 'An operation failed', undoable: false } })
         break
+      case 'auto_sorted': // watch mode moved a new arrival on its own (undo: Watched folders page)
+        set((s) => ({ toast: { id: ++toastSeq, kind: 'info', message: ev.message || 'A new file was sorted', undoable: false }, treeVersion: s.treeVersion + 1 }))
+        break
     }
   },
 

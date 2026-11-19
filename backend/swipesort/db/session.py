@@ -13,7 +13,7 @@ from swipesort.db import models  # noqa: F401  (register tables)
 
 # Bump whenever a table/column changes. Session state is short-lived, so instead of migrations
 # an outdated database file is moved aside (never deleted) and a fresh one is created.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 
 def _version(path: Path) -> int:

@@ -10,6 +10,8 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
+import queue
 import threading
 from collections.abc import Callable
 from concurrent.futures import ProcessPoolExecutor
@@ -65,8 +67,17 @@ def profile_text(rel_path: str, description: str) -> str:
 class SessionPipeline:
     def __init__(self, engine: Engine, settings: Settings, platform: Platform,
                  provider: Provider, session_id: int, llm: LLM | None = None,
-                 use_llm: bool = True) -> None:
+                 use_llm: bool = True, persistent: bool = False) -> None:
         self.engine = engine
+        # persistent (watch sessions, SPEC §18): after the first pass the pipeline stays up
+        # and processes files handed to add_files(); no cold-start taxonomy (cards never wait)
+        self.persistent = persistent
+        self._incoming: queue.Queue[list[int]] = queue.Queue()
+        self.incremental_idle = threading.Event()  # set when no added file is in flight
+        self.incremental_idle.set()
+        # called (pipeline thread) with the ids of files that just became READY; the watch
+        # service uses it to auto-move high-confidence files
+        self.on_scored: Callable[[list[int]], None] | None = None
         self.settings = settings
         self.platform = platform
         self.provider = provider
@@ -144,6 +155,7 @@ class SessionPipeline:
 
     def stop(self) -> None:
         self._stop.set()
+        self._incoming.put([])
         self._rescore_wanted.set()
         self._rerank_wanted.set()
         self._propose_wanted.set()
@@ -176,6 +188,85 @@ class SessionPipeline:
             self.done.set()
             if self.settings.proposals.enabled:
                 self._propose_wanted.set()  # LLM naming of fresh proposals, in the background
+        if self.persistent:
+            self._incremental_loop()
+
+    # ------------------------------------------------------------------ incremental (watch)
+    def add_files(self, file_ids: list[int]) -> None:
+        """Queue newly added File rows (status queued). Processed after the first pass, in
+        arrival order, by the same stages (hash -> extract -> dedup -> embed -> score)."""
+        if file_ids:
+            self.incremental_idle.clear()
+            self._incoming.put(list(file_ids))
+
+    def _incremental_loop(self) -> None:
+        while not self._stop.is_set():
+            try:
+                ids = self._incoming.get(timeout=1.0)
+            except queue.Empty:
+                continue
+            while True:  # drain: everything that arrived meanwhile is one batch
+                try:
+                    ids += self._incoming.get_nowait()
+                except queue.Empty:
+                    break
+            if self._stop.is_set():
+                return
+            try:
+                if ids:
+                    self.process_new(ids)
+            except Exception:
+                log.exception("incremental pipeline step failed")
+                self._mark_all_ready_manual()
+            finally:
+                if self._incoming.empty():
+                    self.incremental_idle.set()
+
+    def process_new(self, file_ids: list[int]) -> list[int]:
+        """Run the pipeline on files added after the first pass. Extraction runs in this
+        thread (a handful of files: a process pool's start-up would cost more than it saves).
+        Returns the ids that became READY."""
+        with DB(self.engine) as db:
+            files = [f for f in (db.get(File, i) for i in dict.fromkeys(file_ids))
+                     if f is not None and f.session_id == self.sid
+                     and f.status == FileStatus.queued]
+            if not files:
+                return []
+            jobs = [(Path(f.path), f.rel_path, f.ext, f"f:{f.id}") for f in files]
+            hashes, digests = self._prepare(db, jobs, use_pool=False)
+            for f in files:
+                fh = hashes.get(f"f:{f.id}")
+                if fh:
+                    f.content_hash = fh
+                    db.add(f)
+            db.commit()
+            # duplicates: against the output tree and the other undecided inputs
+            new_keys = {f"f:{f.id}" for f in files}
+            indexed = [ix for ix in db.exec(select(IndexedFile).where(
+                IndexedFile.session_id == self.sid)).all() if ix.content_hash]
+            others = [f for f in db.exec(select(File).where(
+                File.session_id == self.sid,
+                col(File.status).in_((FileStatus.ready, FileStatus.skipped)))).all()
+                if f.content_hash and f"f:{f.id}" not in new_keys]
+            all_hashes = dict(hashes)
+            all_hashes.update({f"ix:{ix.id}": ix.content_hash for ix in indexed})
+            all_hashes.update({f"f:{f.id}": f.content_hash for f in others})
+            self._dedup(db, sorted(others, key=_card_order) + files, indexed, all_hashes,
+                        only=new_keys)
+            ready = self._score_chunk(db, files, hashes, digests)
+        if ready is None:
+            return []
+        self._emit("ready", ready)
+        self._after_scored(ready)
+        self._rerank_wanted.set()
+        return ready
+
+    def _after_scored(self, ids: list[int]) -> None:
+        if ids and self.on_scored is not None:
+            try:
+                self.on_scored(ids)
+            except Exception:
+                log.exception("on_scored hook failed")
 
     # ------------------------------------------------------------------ stages
     def _run_inner(self) -> None:
@@ -184,11 +275,16 @@ class SessionPipeline:
             assert row is not None
             inp, out = Path(row.input_root), Path(row.output_root)
             folders = db.exec(select(Folder).where(Folder.session_id == self.sid)).all()
-            input_files = db.exec(select(File).where(File.session_id == self.sid)).all()
+            # decided files already live in the output tree (a resumed watch session)
+            input_files = [f for f in db.exec(select(File).where(File.session_id == self.sid))
+                           if f.status != FileStatus.decided]
             input_paths = {f.path for f in input_files}
             by_path = {f.path: f for f in folders}
 
-            # 1. index what already lives in the output tree
+            # 1. index what already lives in the output tree (a resumed session reuses its
+            #    rows, so duplicate cards and undo bookkeeping keep pointing at them)
+            old_ix = {ix.path: ix for ix in db.exec(select(IndexedFile).where(
+                IndexedFile.session_id == self.sid)).all()}
             indexed: list[IndexedFile] = []
             for item in scan(out, self.settings.scan, self.platform):
                 if str(item.path) in input_paths:
@@ -199,9 +295,17 @@ class SessionPipeline:
                 if parent is None or parent.is_inbox:
                     continue
                 assert parent.id is not None
+                prev = old_ix.pop(str(item.path), None)
+                if prev is not None:
+                    prev.folder_id, prev.ext = parent.id, item.ext
+                    indexed.append(prev)
+                    continue
                 indexed.append(IndexedFile(session_id=self.sid, folder_id=parent.id,
                                            path=str(item.path), name=item.path.name,
                                            ext=item.ext))
+            for gone in old_ix.values():
+                if not os.path.lexists(gone.path):  # (quarantined copies stay indexed)
+                    db.delete(gone)
             for ix in indexed:
                 db.add(ix)
             db.commit()
@@ -209,91 +313,17 @@ class SessionPipeline:
                 db.refresh(ix)
             pc = self.settings.proposals
             subfolders = [fo for fo in folders if fo.path != str(out) and not fo.is_inbox]
-            self.cold = pc.enabled and not indexed and not subfolders
+            self.cold = pc.enabled and not self.persistent and not indexed and not subfolders
             self.cold_pending = self.cold
 
             # 2. fingerprint + extract (outputs first: needed to score inputs)
-            pages = self.settings.pipeline.pages
-            max_chars = self.settings.pipeline.max_text_chars
             jobs: list[tuple[Path, str, str, str]] = []  # (path, rel, ext, key)
             for ix in indexed:
                 jobs.append((Path(ix.path), _rel(Path(ix.path), out), ix.ext, f"ix:{ix.id}"))
             order = sorted(input_files, key=_card_order)
             for f in order:
                 jobs.append((Path(f.path), f.rel_path, f.ext, f"f:{f.id}"))
-            hashes: dict[str, str] = {}
-            for path, _rel_p, _ext, key in jobs:
-                try:
-                    hashes[key] = content_hash(path)
-                except OSError as e:
-                    log.warning("hash failed %s: %s", path, e)
-            todo = [(p, hashes[k]) for p, _r, _e, k in jobs if k in hashes
-                    and db.get(Extraction, hashes[k]) is None]
-            todo = list({h: (p, h) for p, h in reversed(todo)}.values())[::-1]
-            results: dict[str, ExtractResult] = {}
-            if todo:
-                workers = self.settings.pipeline.extract_workers or None
-                with ProcessPoolExecutor(max_workers=workers) as pool:
-                    for (_path, done_h), res in zip(
-                        todo,
-                        pool.map(extract, [p for p, _ in todo], [max_chars] * len(todo),
-                                 [pages] * len(todo)),
-                        strict=True,
-                    ):
-                        results[done_h] = res
-
-            # 2b. dedup features (pHash/dHash, MinHash), cached by content hash
-            path_of = {hashes[k]: p for p, _r, _e, k in jobs if k in hashes}
-            feat_todo = [h for h in dict.fromkeys(hashes.values())
-                         if db.get(Features, h) is None]
-            if feat_todo:
-                texts, images = [], []
-                for h in feat_todo:
-                    r = results.get(h)
-                    ex = None if r is not None else db.get(Extraction, h)
-                    texts.append(r.text if r is not None else (ex.digest_text if ex else ""))
-                    images.append(r.is_image if r is not None
-                                  else bool(ex and ex.mime.startswith("image/")))
-                workers = self.settings.pipeline.extract_workers or None
-                with ProcessPoolExecutor(max_workers=workers) as pool:
-                    feats = list(pool.map(compute_features, [path_of[h] for h in feat_todo],
-                                          texts, images,
-                                          [self.settings.dedup] * len(feat_todo)))
-                for h, fr in zip(feat_todo, feats, strict=True):
-                    db.add(Features(content_hash=h, **fr.model_dump()))
-                db.commit()
-
-            # 3. digest (+ OCR / caption for images), cached by content hash
-            digests: dict[str, str] = {}
-            for path, rel, ext, key in jobs:
-                hk = hashes.get(key)
-                if hk is None:
-                    continue
-                cached = db.get(Extraction, hk)
-                if cached is not None and hk not in results:
-                    digests[key] = cached.digest_text
-                    continue
-                maybe = results.get(hk)
-                if maybe is None:
-                    continue
-                res = maybe
-                ocr_text = caption = ""
-                if res.is_image:
-                    try:
-                        ocr_text = self.platform.ocr(path)
-                    except Exception:  # noqa: BLE001
-                        ocr_text = ""
-                    try:
-                        caption = self.provider.caption(path)
-                    except ModelUnavailable:
-                        caption = ""
-                digest = build_digest(path.name, rel, ext, res, caption=caption,
-                                      ocr_text=ocr_text)
-                digests[key] = digest
-                if db.get(Extraction, hk) is None:
-                    db.add(Extraction(content_hash=hk, mime=res.mime, digest_text=digest,
-                                      metadata_json=json.dumps(res.metadata, default=str),
-                                      page_count=res.page_count, ocr_used=bool(ocr_text)))
+            hashes, digests = self._prepare(db, jobs, use_pool=True)
             for f in input_files:
                 fh = hashes.get(f"f:{f.id}")
                 if fh:
@@ -307,7 +337,8 @@ class SessionPipeline:
             db.commit()
 
             # 3b. duplicates (SPEC §5) -> duplicate suggestions; shown before classification
-            self._dedup(db, order, indexed, hashes)
+            self._dedup(db, order, indexed, hashes,
+                        only={f"f:{f.id}" for f in order if f.status == FileStatus.queued})
 
             # 4. embed what scoring needs first: folder profiles + the output tree's files
             prof_items: list[tuple[str, str]] = []
@@ -373,30 +404,11 @@ class SessionPipeline:
                 size = small if buffered < target else batch
                 chunk = pending[i:i + size]
                 i += size
-                emb_todo = [(hashes[f"f:{f.id}"], digests[f"f:{f.id}"]) for f in chunk
-                            if f"f:{f.id}" in digests]
-                try:
-                    cvecs = embed_cached(db, self.provider, emb_todo, batch)
-                except ModelUnavailable as e:
-                    self._degrade(e)
+                ready = self._score_chunk(db, chunk, hashes, digests)
+                if ready is None:
                     return
-                ready: list[int] = []
-                for f in chunk:
-                    assert f.id is not None
-                    fh2 = hashes.get(f"f:{f.id}")
-                    vec = cvecs.get(fh2) if fh2 else None
-                    if vec is not None:
-                        self._vecs[f.id] = vec
-                    fresh = db.get(File, f.id)
-                    if fresh is None or fresh.status != FileStatus.queued:
-                        continue
-                    if vec is not None:
-                        db.add(self._suggest(fresh, vec))
-                    fresh.status = FileStatus.ready
-                    db.add(fresh)
-                    ready.append(f.id)
-                db.commit()
                 self._emit("ready", ready)
+                self._after_scored(ready)
                 self._rerank_wanted.set()
 
         # 7. proposals (SPEC §6): every file is scored; group what couldn't be placed (or, on
@@ -407,9 +419,130 @@ class SessionPipeline:
             except Exception:
                 log.exception("proposer failed")
 
+    def _score_chunk(self, db: DB, chunk: list[File], hashes: dict[str, str],
+                     digests: dict[str, str]) -> list[int] | None:
+        """Stages 4-6 for input files: embed (single-flight, cached) + score -> READY.
+        Returns the ids that became READY, or None when the model is unavailable."""
+        emb_todo = [(hashes[f"f:{f.id}"], digests[f"f:{f.id}"]) for f in chunk
+                    if f"f:{f.id}" in digests]
+        try:
+            cvecs = embed_cached(db, self.provider, emb_todo,
+                                 max(1, self.settings.pipeline.embed_batch))
+        except ModelUnavailable as e:
+            self._degrade(e)
+            return None
+        ready: list[int] = []
+        for f in chunk:
+            assert f.id is not None
+            fh2 = hashes.get(f"f:{f.id}")
+            vec = cvecs.get(fh2) if fh2 else None
+            if vec is not None:
+                self._vecs[f.id] = vec
+            fresh = db.get(File, f.id)
+            if fresh is None or fresh.status != FileStatus.queued:
+                continue
+            if vec is not None:
+                db.add(self._suggest(fresh, vec))
+            fresh.status = FileStatus.ready
+            db.add(fresh)
+            ready.append(f.id)
+        db.commit()
+        return ready
+
+    def _prepare(self, db: DB, jobs: list[tuple[Path, str, str, str]], use_pool: bool
+                 ) -> tuple[dict[str, str], dict[str, str]]:
+        """Stages 2-3 for `jobs` [(path, rel, ext, key)]: content hash, extraction, dedup
+        features and digest, all cached by content hash. Returns (key -> hash, key -> digest)."""
+        pages = self.settings.pipeline.pages
+        max_chars = self.settings.pipeline.max_text_chars
+        hashes: dict[str, str] = {}
+        for path, _rel_p, _ext, key in jobs:
+            try:
+                hashes[key] = content_hash(path)
+            except OSError as e:
+                log.warning("hash failed %s: %s", path, e)
+        todo = [(p, hashes[k]) for p, _r, _e, k in jobs if k in hashes
+                and db.get(Extraction, hashes[k]) is None]
+        todo = list({h: (p, h) for p, h in reversed(todo)}.values())[::-1]
+        results: dict[str, ExtractResult] = {}
+        if todo and use_pool:
+            workers = self.settings.pipeline.extract_workers or None
+            with ProcessPoolExecutor(max_workers=workers) as pool:
+                for (_path, done_h), res in zip(
+                    todo,
+                    pool.map(extract, [p for p, _ in todo], [max_chars] * len(todo),
+                             [pages] * len(todo)),
+                    strict=True,
+                ):
+                    results[done_h] = res
+        else:
+            for path_, done_h in todo:
+                results[done_h] = extract(path_, max_chars, pages)
+
+        # 2b. dedup features (pHash/dHash, MinHash), cached by content hash
+        path_of = {hashes[k]: p for p, _r, _e, k in jobs if k in hashes}
+        feat_todo = [h for h in dict.fromkeys(hashes.values())
+                     if db.get(Features, h) is None]
+        if feat_todo:
+            texts: list[str] = []
+            images: list[bool] = []
+            for h in feat_todo:
+                r = results.get(h)
+                ex = None if r is not None else db.get(Extraction, h)
+                texts.append(r.text if r is not None else (ex.digest_text if ex else ""))
+                images.append(r.is_image if r is not None
+                              else bool(ex and ex.mime.startswith("image/")))
+            if use_pool:
+                workers = self.settings.pipeline.extract_workers or None
+                with ProcessPoolExecutor(max_workers=workers) as pool:
+                    feats = list(pool.map(compute_features, [path_of[h] for h in feat_todo],
+                                          texts, images,
+                                          [self.settings.dedup] * len(feat_todo)))
+            else:
+                feats = [compute_features(path_of[h], t, im, self.settings.dedup)
+                         for h, t, im in zip(feat_todo, texts, images, strict=True)]
+            for h, fr in zip(feat_todo, feats, strict=True):
+                db.add(Features(content_hash=h, **fr.model_dump()))
+            db.commit()
+
+        # 3. digest (+ OCR / caption for images), cached by content hash
+        digests: dict[str, str] = {}
+        for path, rel, ext, key in jobs:
+            hk = hashes.get(key)
+            if hk is None:
+                continue
+            cached = db.get(Extraction, hk)
+            if cached is not None and hk not in results:
+                digests[key] = cached.digest_text
+                continue
+            maybe = results.get(hk)
+            if maybe is None:
+                continue
+            res = maybe
+            ocr_text = caption = ""
+            if res.is_image:
+                try:
+                    ocr_text = self.platform.ocr(path)
+                except Exception:  # noqa: BLE001
+                    ocr_text = ""
+                try:
+                    caption = self.provider.caption(path)
+                except ModelUnavailable:
+                    caption = ""
+            digest = build_digest(path.name, rel, ext, res, caption=caption,
+                                  ocr_text=ocr_text)
+            digests[key] = digest
+            if db.get(Extraction, hk) is None:
+                db.add(Extraction(content_hash=hk, mime=res.mime, digest_text=digest,
+                                  metadata_json=json.dumps(res.metadata, default=str),
+                                  page_count=res.page_count, ocr_used=bool(ocr_text)))
+        db.commit()
+        return hashes, digests
+
     # ------------------------------------------------------------------ dedup
     def _dedup(self, db: DB, order: list[File], indexed: list[IndexedFile],
-               hashes: dict[str, str]) -> None:
+               hashes: dict[str, str], only: set[str] | None = None) -> None:
+        """Duplicate suggestions for the input files whose key is in `only` (default: all)."""
         items: list[DedupItem] = []
         for ix in indexed:
             h = hashes.get(f"ix:{ix.id}")
@@ -420,6 +553,8 @@ class SessionPipeline:
             if h:
                 items.append(self._dedup_item(db, f"f:{f.id}", "input", Path(f.path), h))
         for m in find_duplicates(items, self.settings.dedup):
+            if only is not None and m.a not in only:
+                continue
             fid = int(m.a.split(":")[1])
             db.add(Suggestion(
                 session_id=self.sid, file_id=fid, kind="duplicate", confidence=m.similarity,

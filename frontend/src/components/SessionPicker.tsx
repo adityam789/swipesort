@@ -52,6 +52,7 @@ export function SessionPicker({
               <span className="min-w-0 flex-1">
                 <span className="block truncate font-medium">
                   {baseName(s.input_root)} → {baseName(s.output_root)}
+                  {s.kind === 'watch' && <span className="ml-2 rounded bg-amber-100 px-1.5 text-xs font-normal text-amber-800 dark:bg-amber-900/40 dark:text-amber-300">watched</span>}
                 </span>
                 <span className="block text-xs text-stone-500">
                   {s.progress.decided}/{total} sorted · {s.progress.remaining} left

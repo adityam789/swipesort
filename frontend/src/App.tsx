@@ -6,6 +6,7 @@ import { SessionPicker } from './components/SessionPicker'
 import { Pair } from './pages/Pair'
 import { Setup } from './pages/Setup'
 import { Sort } from './pages/Sort'
+import { Watch } from './pages/Watch'
 import { useSession } from './store/session'
 
 const queryClient = new QueryClient({
@@ -46,6 +47,26 @@ export function Root() {
     setAutoJoin(false)
     setSessionId(null)
   }
+  const go = (to: string) => {
+    window.history.pushState(null, '', to)
+    setPath(to)
+  }
+  // Watch mode: open a watched folder's session (its pending queue) in the swipe UI
+  const openSession = useCallback(
+    async (id: number) => {
+      useSession.getState().reset()
+      window.history.pushState(null, '', '/')
+      setPath('/')
+      start(await api.getSession(id))
+    },
+    [start],
+  )
+
+  useEffect(() => {
+    const onPop = () => setPath(window.location.pathname)
+    window.addEventListener('popstate', onPop)
+    return () => window.removeEventListener('popstate', onPop)
+  }, [])
 
   // A revoked/expired phone gets 401s: drop the session and show pairing again.
   useEffect(() => {
@@ -80,8 +101,13 @@ export function Root() {
     )
   }
   if (!status.data.paired) return <Pair onPaired={paired} />
-  if (sessionId !== null) return <Sort sessionId={sessionId} onNew={leave} local={status.data.local} />
-  if (status.data.local) return <Setup onStart={start} />
+  if (path === '/watch' && status.data.local) {
+    const undo = Number(new URLSearchParams(window.location.search).get('undo'))
+    return <Watch onBack={() => go('/')} onOpenSession={(id) => void openSession(id)} highlight={Number.isFinite(undo) && undo > 0 ? undo : null} />
+  }
+  if (sessionId !== null)
+    return <Sort sessionId={sessionId} onNew={leave} local={status.data.local} onOpenSession={(id) => void openSession(id)} />
+  if (status.data.local) return <Setup onStart={start} onWatch={() => go('/watch')} onOpenSession={(id) => void openSession(id)} />
   return <PhoneHome onPick={start} autoJoin={autoJoin} />
 }
 

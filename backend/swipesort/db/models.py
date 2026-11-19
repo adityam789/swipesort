@@ -43,6 +43,9 @@ class Session(SQLModel, table=True):
     created_at: datetime = Field(default_factory=now)
     status: str = "active"
     config_json: str = "{}"
+    # "manual" (a one-off sorting session) | "watch" (long-lived: one per watched folder +
+    # output pair, reused across daemon restarts; new files are added incrementally, SPEC §18)
+    kind: str = Field(default="manual", index=True)
 
 
 class File(SQLModel, table=True):
@@ -84,6 +87,7 @@ class Decision(SQLModel, table=True):
     latency_ms: int = 0
     undone: bool = False
     payload_json: str = ""  # batch decisions: {"members": [...], "tiers": {...}} for undo
+    source: str = Field(default="user", index=True)  # user | auto (watch mode, SPEC §18)
 
 
 class Op(SQLModel, table=True):

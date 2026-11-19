@@ -45,6 +45,7 @@ class SessionOut(BaseModel):
     progress: Progress
     live: bool = True  # pipeline running in this daemon (False: left over from an earlier run)
     created_at: datetime | None = None
+    kind: str = "manual"  # manual | watch (a watched folder's pending queue, SPEC §18)
 
 
 class TreeNode(BaseModel):
@@ -207,8 +208,88 @@ class StreamEvent(BaseModel):
     """WS /api/sessions/{id}/stream (SPEC §7, §12). One JSON object per message."""
 
     type: Literal["card_ready", "card_updated", "card_removed", "tree_changed", "progress",
-                  "op_failed", "hello"]
+                  "op_failed", "hello", "auto_sorted"]
     card: Card | None = None  # card_ready / card_updated
     card_id: str | None = None  # card_removed
     progress: Progress | None = None  # progress (also piggybacked on others)
-    message: str = ""  # op_failed
+    message: str = ""  # op_failed / auto_sorted ("Sorted x → Finance/Receipts")
+    decision_id: int | None = None  # auto_sorted: undo with POST /api/decisions/{id}/undo
+
+
+# ---------- watch mode (SPEC §18) ----------
+class WatchFolderIn(BaseModel):
+    path: str  # the watched folder (e.g. ~/Downloads)
+    output: str  # the output tree its files are sorted into
+    enabled: bool = True
+
+
+class WatchFolderOut(WatchFolderIn):
+    session_id: int | None = None  # the folder's long-lived watch session (its pending queue)
+    running: bool = False
+    pending: int = 0  # READY cards waiting for the user
+    processing: int = 0  # settled, still in the pipeline
+    error: str = ""
+
+
+class WatchSafety(BaseModel):
+    decisions: int  # user decisions so far (all sessions)
+    min_decisions_for_auto: int
+    auto_unlocked: bool
+
+
+class WatchConfigOut(BaseModel):
+    enabled: bool
+    running: bool
+    folders: list[WatchFolderOut]
+    settle_seconds: float
+    auto_move_threshold: float
+    auto_move: bool
+    notify: bool
+    auto_trash_exact_dupes: bool
+    ignore: list[str]
+    digest_days: int
+    safety: WatchSafety
+
+
+class WatchConfigIn(BaseModel):
+    """PUT /api/watch: only the fields given change (thresholds stay in config.toml)."""
+
+    enabled: bool | None = None
+    folders: list[WatchFolderIn] | None = None
+    auto_move: bool | None = None
+    notify: bool | None = None
+    auto_trash_exact_dupes: bool | None = None
+
+
+class WatchStatus(BaseModel):
+    enabled: bool
+    running: bool
+    pending_total: int
+    folders: list[WatchFolderOut]
+    safety: WatchSafety
+
+
+class WatchActivityItem(BaseModel):
+    decision_id: int
+    session_id: int
+    file_id: int | None
+    name: str
+    action: Literal["move", "trash"]
+    src: str  # where it arrived (absolute)
+    dst: str  # where it went (absolute)
+    dest_rel: str  # destination folder relative to the output tree ("" = root)
+    confidence: float | None = None
+    ts: datetime
+    undone: bool
+    can_undo: bool
+    undo_blocked: str = ""  # why a targeted undo would be refused
+
+
+class WatchActivity(BaseModel):
+    """The weekly digest: what was sorted automatically, and what's still waiting."""
+
+    days: int
+    items: list[WatchActivityItem]
+    auto_moved: int
+    auto_trashed: int
+    pending_total: int

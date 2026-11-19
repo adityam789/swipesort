@@ -5,11 +5,12 @@ All thresholds, weights and model names live here. Never hard-code them elsewher
 
 from __future__ import annotations
 
+import json
 import os
 import tomllib
 from pathlib import Path
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class Tiers(BaseModel):
@@ -91,14 +92,53 @@ class Proposals(BaseModel):
     })
 
 
+class WatchFolder(BaseModel):
+    """One watched folder and the output tree its files are sorted into (SPEC §18)."""
+
+    path: str
+    output: str = ""  # empty: watch.default_output
+    enabled: bool = True
+
+
 class Watch(BaseModel):
+    """Watch mode (SPEC §18). `folders` accepts plain strings (backward compatible: they use
+    `default_output`) or {path, output, enabled} tables."""
+
     enabled: bool = False
-    folders: list[str] = Field(default_factory=lambda: ["~/Downloads"])
-    settle_seconds: float = 5
+    folders: list[WatchFolder] = Field(default_factory=lambda: [WatchFolder(path="~/Downloads")])
+    default_output: str = ""  # output tree for plain-string folder entries
+    settle_seconds: float = 5  # size + mtime stable this long (and not locked) -> process
+    settle_poll_seconds: float = 0.5  # how often the settler re-checks tracked paths
+    rescan_seconds: float = 30  # periodic top-level rescan for events the OS dropped
     auto_move_threshold: float = 0.97
     auto_move: bool = True
+    # SPEC §18 safety: auto actions stay off until the user made this many decisions (counted
+    # across all sessions: calibration is global, not per folder)
+    min_decisions_for_auto: int = 50
+    auto_trash_exact_dupes: bool = False  # exact dupes of an output-tree file -> quarantine
     notify: bool = True
-    ignore: list[str] = Field(default_factory=lambda: ["*.crdownload", "*.part", "*.download"])
+    notify_summary_over: int = 3  # more auto-moves than this in one burst -> one summary toast
+    digest_days: int = 7  # the activity digest ("what was auto-sorted this week")
+    ignore: list[str] = Field(default_factory=lambda: [
+        "*.crdownload", "*.part", "*.download", "*.tmp", "*.partial", "*.opdownload",
+        "~$*", ".~lock.*",
+    ])
+
+    @field_validator("folders", mode="before")
+    @classmethod
+    def _plain_paths(cls, v: object) -> object:
+        if isinstance(v, list):
+            return [{"path": x} if isinstance(x, str) else x for x in v]
+        return v
+
+    def resolved_folders(self) -> list[WatchFolder]:
+        """Folders with `output` filled from `default_output`; entries without one are dropped."""
+        out: list[WatchFolder] = []
+        for f in self.folders:
+            output = f.output or self.default_output
+            if output:
+                out.append(f.model_copy(update={"output": output}))
+        return out
 
 
 class Trash(BaseModel):
@@ -245,12 +285,26 @@ def app_dir() -> Path:
     return Path(os.environ.get("SWIPESORT_HOME", Path.home() / ".swipesort"))
 
 
+def watch_overlay_path(home: Path | None = None) -> Path:
+    """Watch settings changed in the app (PUT /api/watch) are saved here, over config.toml."""
+    return (home or app_dir()) / "watch.json"
+
+
 def load_settings(path: Path | None = None) -> Settings:
     path = path or app_dir() / "config.toml"
     s = Settings()
     if path.is_file():
         with path.open("rb") as f:
             s = Settings.model_validate(tomllib.load(f))
+    overlay = watch_overlay_path(path.parent)
+    if overlay.is_file():  # runtime watch settings saved by PUT /api/watch
+        try:
+            data = json.loads(overlay.read_text(encoding="utf-8"))
+            s.watch = Watch.model_validate({**s.watch.model_dump(), **data})
+        except (OSError, ValueError):
+            pass  # a broken overlay never stops the daemon; config.toml still applies
+    if os.environ.get("SWIPESORT_WATCH") == "1":  # `swipesort serve --watch`
+        s.watch.enabled = True
     # `swipesort serve --lan/--port` pass these down (also to uvicorn's reload subprocess).
     if os.environ.get("SWIPESORT_LAN") is not None:
         s.server.lan = os.environ["SWIPESORT_LAN"] == "1"
