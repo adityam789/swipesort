@@ -4,6 +4,8 @@ import { isHighlighted } from '../lib/duplicate'
 import { BatchCard } from './BatchCard'
 import { DuplicateCard } from './DuplicateCard'
 import { ManualCard } from './ManualCard'
+import { ProposalCard } from './ProposalCard'
+import { TaxonomyCard } from './TaxonomyCard'
 
 const POSITION: Record<Direction, string> = {
   up: 'top-0 left-1/2 -translate-x-1/2',
@@ -18,7 +20,8 @@ function tone(edge: Edge): string {
   if (edge.action === 'trash' || edge.action === 'trash_all') return 'border-red-300 text-red-700 dark:border-red-900 dark:text-red-300'
   if (edge.action === 'flip' || edge.action === 'inbox' || edge.action === 'reject_all')
     return 'border-amber-300 text-amber-800 dark:border-amber-900 dark:text-amber-300'
-  if (edge.action === 'details' || edge.action === 'review') return 'border-sky-300 text-sky-800 dark:border-sky-900 dark:text-sky-300'
+  if (edge.action === 'dismiss') return 'border-stone-300 text-stone-600 dark:border-stone-700 dark:text-stone-400'
+  if (edge.action === 'details' || edge.action === 'review' || edge.action === 'suggest_folder') return 'border-sky-300 text-sky-800 dark:border-sky-900 dark:text-sky-300'
   if (edge.action === 'defer') return 'border-stone-300 text-stone-600 dark:border-stone-700 dark:text-stone-400'
   return 'border-emerald-300 text-emerald-800 dark:border-emerald-900 dark:text-emerald-300'
 }
@@ -92,6 +95,10 @@ function CardBody({ card }: { card: Card }) {
       return card.duplicate ? <DuplicateCard card={card} /> : <ManualCard card={card} />
     case 'batch':
       return card.batch ? <BatchCard card={card} /> : <ManualCard card={card} />
+    case 'folder_proposal':
+      return card.proposal ? <ProposalCard card={card} /> : <ManualCard card={card} />
+    case 'taxonomy':
+      return card.taxonomy ? <TaxonomyCard card={card} /> : <ManualCard card={card} />
     default:
       return <ManualCard card={card} />
   }

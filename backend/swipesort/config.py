@@ -40,10 +40,55 @@ class Dedup(BaseModel):
 
 
 class Proposals(BaseModel):
-    min_cluster: int = 3
-    cohesion: float = 0.70
-    max_sibling_sim: float = 0.55
-    singleton_new_topic: float = 0.40
+    """New folders & cold start (SPEC §6). Similarities are cosines on the embedding model's
+    scale, so `by_provider` overrides them per provider (like scoring.temperature_by_provider)."""
+
+    enabled: bool = True
+    # §6.1 low-confidence routing: one card per group of < tiers.choices files
+    min_cluster: int = 3  # HDBSCAN min_cluster_size; also the minimum live members of a card
+    cohesion: float = 0.70  # mean pairwise cosine of the group
+    max_sibling_sim: float = 0.55  # group centroid vs every sibling folder (centroid or profile)
+    singleton_new_topic: float = 0.40  # a lone file this far from every folder -> new-topic card
+    group_merge_sim: float = 0.85  # merge over-split groups whose centroids are this close
+    singleton_max: int = 3  # at most this many singleton proposals per run
+    dismissed_overlap: float = 0.5  # don't re-propose a group sharing this much with a dismissal
+    # §6.2 re-run triggers
+    every_decisions: int = 25
+    inbox_trigger: int = 8  # files sent to _Inbox folders since the last run
+    # §6.2 cold start (empty output): leaf clusters -> 5..12 top folders, 2 levels max
+    cold_min_cluster_frac: float = 0.02  # leaf min_cluster_size = max(min_cluster, frac * n)
+    cold_min_samples: int = 0  # HDBSCAN min_samples for the leaf pass (0 = library default)
+    top_min: int = 5
+    top_max: int = 12
+    top_merge_sim: float = 0.75  # leaf centroids at least this similar share a top folder
+    noise_attach: float = 0.70  # unclustered file joins its nearest leaf at >= this cosine
+    # accepted folders start with this mix of member centroid and name embedding as profile
+    seed_centroid_weight: float = 0.8
+    # naming
+    llm_naming: bool = True
+    llm_samples: int = 6  # member samples per cluster shown to the LLM
+    name_max_len: int = 40
+    keyword_min_df: float = 0.3  # a fallback keyword must occur in this share of members
+    keyword_title_bonus: float = 1.0  # extra weight for terms in file names / titles / camera
+    kind_hint_share: float = 0.7  # share of members whose digest kind matches a hint
+    kind_hints: dict[str, str] = Field(default_factory=lambda: {
+        "screenshot": "Screenshots", "photo": "Photos", "image": "Images", "code": "Code",
+        "video": "Videos", "audio": "Audio", "spreadsheet": "Spreadsheets",
+    })
+    generic_names: list[str] = Field(default_factory=lambda: [
+        "misc", "miscellaneous", "other", "others", "stuff", "files", "file", "documents",
+        "document", "docs", "untitled", "new folder", "folder", "unsorted", "various", "general",
+        "items", "things", "data", "inbox", "_inbox", "archive", "temp", "tmp", "downloads",
+        "desktop", "random", "assorted",
+    ])
+    by_provider: dict[str, dict[str, float]] = Field(default_factory=lambda: {
+        # hashing embeddings: unrelated texts sit near 0, same-kind texts around 0.4-0.7
+        "fake": {"cohesion": 0.35, "max_sibling_sim": 0.55, "singleton_new_topic": 0.15,
+                 "top_merge_sim": 0.30, "noise_attach": 0.35, "group_merge_sim": 0.30},
+        # bge-small: compressed band (unrelated ~0.5, same topic ~0.8)
+        "local": {"cohesion": 0.72, "max_sibling_sim": 0.85, "singleton_new_topic": 0.55,
+                  "top_merge_sim": 0.75, "noise_attach": 0.70, "group_merge_sim": 0.85},
+    })
 
 
 class Watch(BaseModel):

@@ -258,4 +258,48 @@ describe('session store', () => {
       expect(useSession.getState().counts.moved).toBe(0)
     })
   })
+
+  it('proposal accept sends the edited name, consumes members and refetches', async () => {
+    const prop: Card = {
+      ...mk(9),
+      id: 'p9',
+      kind: 'folder_proposal',
+      edges: { right: { label: 'Create Loans/', action: 'accept' } },
+      proposal: {
+        proposal_id: 9, name: 'Loans', parent_folder_id: 1, parent_path: '', path: 'Loans', inbox_path: '_Inbox',
+        members: [mk(2).file, mk(3).file], cohesion: 0.8, singleton: false, named_by: 'fallback',
+      },
+    }
+    getCards.mockResolvedValueOnce([prop, mk(1), mk(2)])
+    await useSession.getState().start(session)
+    decide.mockResolvedValue({ decision_id: 5, final_path: null, progress })
+    getCards.mockResolvedValue([mk(1), mk(4)])
+    useSession.getState().setDraft('p9', { name: ' Home Loans ' })
+    useSession.getState().decide(prop, prop.edges.right as Edge)
+    const s = useSession.getState()
+    expect(s.queue.map((c) => c.id)).toEqual(['m1']) // member m2 is consumed
+    expect(s.counts.moved).toBe(2)
+    expect(s.undoStack.at(-1)?.count).toBe(2)
+    await vi.waitFor(() => expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m1', 'm4']))
+    expect(decide).toHaveBeenCalledWith('p9', expect.objectContaining({ action: 'accept', name: 'Home Loans' }))
+  })
+
+  it('taxonomy accept sends the selected nodes and renames, and counts no files', async () => {
+    const tax: Card = {
+      ...mk(9),
+      id: 'p3',
+      kind: 'taxonomy',
+      edges: { right: { label: 'Create these folders', action: 'accept' } },
+      taxonomy: { proposal_id: 3, nodes: [], inbox_count: 0, total: 3, named_by: 'fallback' },
+    }
+    getCards.mockResolvedValueOnce([tax])
+    await useSession.getState().start(session)
+    decide.mockResolvedValue({ decision_id: 6, final_path: null, progress })
+    getCards.mockResolvedValue([mk(1)])
+    useSession.getState().setDraft('p3', { accepted_nodes: ['0'], renames: { '0': 'Money' } })
+    useSession.getState().decide(tax, tax.edges.right as Edge)
+    expect(useSession.getState().counts.moved).toBe(0)
+    await vi.waitFor(() => expect(useSession.getState().queue.map((c) => c.id)).toEqual(['m1']))
+    expect(decide).toHaveBeenCalledWith('p3', expect.objectContaining({ accepted_nodes: ['0'], renames: { '0': 'Money' } }))
+  })
 })

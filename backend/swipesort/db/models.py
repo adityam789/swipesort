@@ -165,3 +165,28 @@ class Features(SQLModel, table=True):
     height: int = 0
     minhash: bytes = b""  # datasketch LeanMinHash hashvalues as uint64 LE, text docs only
     text_len: int = 0
+
+
+class Proposal(SQLModel, table=True):
+    """A new-folder proposal (SPEC §6, §11).
+
+    kind: folder (one new folder under `parent_folder_id`, the descent stop node) |
+          taxonomy (cold start: a 2-level structure under the output root, see taxonomy_json).
+    status: pending | accepted | inboxed | dismissed | withdrawn
+    Members decided individually simply drop out (computed live); a card with fewer than
+    min(proposals.min_cluster, original size) live members is not shown.
+    """
+
+    id: int | None = Field(default=None, primary_key=True)
+    session_id: int = Field(foreign_key="session.id", index=True)
+    parent_folder_id: int | None = Field(default=None, foreign_key="folder.id")
+    name: str = ""
+    member_file_ids_json: str = "[]"
+    cohesion: float = 0.0
+    status: str = "pending"
+    kind: str = "folder"
+    # {"nodes": [{"id", "name", "members": [...], "children": [...]}], "inbox": [...]}
+    taxonomy_json: str = ""
+    named_by: str = "fallback"  # fallback | llm | user
+    singleton: bool = False  # §6.1 "clearly a new topic" single file (lower priority)
+    created_at: datetime = Field(default_factory=now)

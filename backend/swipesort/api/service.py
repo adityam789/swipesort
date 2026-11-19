@@ -24,8 +24,11 @@ from swipesort.api.schemas import (
     FileInfo,
     FolderOut,
     Progress,
+    ProposalInfo,
     SessionOut,
     StreamEvent,
+    TaxonomyInfo,
+    TaxonomyNode,
     TreeNode,
     UndoOut,
 )
@@ -39,9 +42,11 @@ from swipesort.db.models import (
     Op,
     OpStatus,
     OpType,
+    Proposal,
     Suggestion,
 )
 from swipesort.db.models import Session as SessionRow
+from swipesort.engine import naming
 from swipesort.engine.batching import BatchItem, make_batches
 from swipesort.exec.errors import ExecError
 from swipesort.exec.executor import Executor
@@ -50,13 +55,14 @@ from swipesort.ml import get_provider
 from swipesort.ml.gateway import Provider
 from swipesort.ml.llm import LLM
 from swipesort.pipeline.scanner import list_dirs, scan
-from swipesort.pipeline.worker import SessionPipeline
+from swipesort.pipeline.worker import SessionPipeline, Vec
 from swipesort.platform import get_platform
 from swipesort.platform.base import Platform
 
 REMAINING = (FileStatus.queued, FileStatus.ready, FileStatus.skipped)
 SHOWABLE = (FileStatus.ready, FileStatus.skipped)
 INBOX_NAME = "_Inbox"
+PROPOSAL_ACTIONS = ("proposal_accept", "proposal_inbox", "proposal_dismiss", "taxonomy_accept")
 
 
 class NotFound(Exception):
@@ -197,6 +203,8 @@ class SessionService:
             if f is None or f.status not in SHOWABLE:
                 return None
             row = self._session(db, f.session_id)
+            if fid in self._hidden(db, f.session_id):
+                return None  # shown as part of a proposal card (or held for the cold start)
             sug = self._dup_suggestion(db, fid)
             if sug is not None and f.status == FileStatus.ready:
                 card = self._dup_card(f, sug, db, row)
@@ -219,6 +227,13 @@ class SessionService:
 
     def _on_pipeline(self, sid: int, kind: str, ids: list[int]) -> None:
         if not self.events.has_subscribers(sid):
+            return
+        if kind in ("proposals", "proposals_updated"):
+            self._publish_proposals(sid, ids, kind == "proposals")
+            return
+        if kind == "proposals_withdrawn":
+            for pid in ids:
+                self.publish(sid, "card_removed", card_id=f"p{pid}")
             return
         etype = {"ready": "card_ready", "updated": "card_updated"}.get(kind)
         if etype is None:
@@ -438,6 +453,12 @@ class SessionService:
                  if sg.file_id in by_id and by_id[sg.file_id].status == FileStatus.ready),
                 key=lambda sg: rank[sg.file_id])
             out: list[Card] = []
+            # M5: a cold-start "Proposed structure" card leads (it decides the whole tree),
+            # then duplicates, then folder proposals (members aren't shown individually).
+            props, hidden, hold = self._proposal_view(db, sid, by_id)
+            for pr, live in props:
+                if pr.kind == "taxonomy":
+                    out.append(self._proposal_card(pr, live, db, root))
             dup_ids: set[int] = {sg.file_id for sg in dup_sugs}
             shown_dups: set[int] = set()
             for sg in dup_sugs:
@@ -449,6 +470,13 @@ class SessionService:
                 else:
                     out.append(card)
                     shown_dups.add(sg.file_id)
+            for pr, live in props:
+                if len(out) >= limit:
+                    break
+                if pr.kind != "taxonomy":
+                    out.append(self._proposal_card(pr, live, db, root))
+            if hold:
+                return out
             # Latest classify suggestion per file, as plain columns (no ORM objects: hot path)
             latest: dict[int, tuple[int, str, float, int | None, bool, bool, str]] = {}
             for sg_id, fid, tier, conf, stop, reached, ok, cj in db.execute(
@@ -466,7 +494,7 @@ class SessionService:
                 for f in ranked:
                     lt = latest.get(f.id or -1)
                     if (f.id is None or f.id in dup_ids or f.status != FileStatus.ready
-                            or lt is None or not lt[5]):
+                            or lt is None or not lt[5] or f.id in hidden):
                         continue
                     _, tier, conf, stop, reached, _, cj = lt
                     top = cj[cj.find('"folder_id": ') + 13:].split(",", 1)[0] if cj != "[]" else ""
@@ -483,7 +511,8 @@ class SessionService:
                     if card is not None:
                         out.append(card)
                         batched.update(g.file_ids)
-            rest = [f for f in ranked if f.id not in dup_ids and f.id not in batched]
+            rest = [f for f in ranked if f.id not in dup_ids and f.id not in batched
+                    and f.id not in hidden]
             need = rest[: max(0, limit - len(out))]
             if need:
                 sugs = {sg.file_id: sg for sg in db.exec(select(Suggestion).where(
@@ -516,6 +545,10 @@ class SessionService:
             "left": Edge(label="Reject all", action="reject_all"),
             "down": Edge(label=f"Trash all {n}", action="trash_all"),
         }
+        if kind != "move" and self.settings.proposals.enabled:
+            # SPEC §6.1: "send them to Work/_Inbox/?" -> Up suggests a new folder anyway
+            edges["up"] = Edge(label="Suggest a new folder", action="suggest_folder")
+            edges["left"] = Edge(label="Review one by one", action="review")
         return Card(
             id=f"b{kind[0]}{target_id}", kind="batch", file=infos[0], reason=reason,
             edges=edges, confidence=min_conf, destination=dest,
@@ -537,6 +570,8 @@ class SessionService:
     def decide(self, card_id: str, body: DecideIn) -> DecideOut:
         if card_id[:1] == "b":
             return self.decide_batch(card_id, body)
+        if card_id[:1] == "p" and card_id[1:].isdigit():
+            return self.decide_proposal(int(card_id[1:]), body)
         if card_id[:1] not in ("m", "d") or not card_id[1:].isdigit():
             raise NotFound(f"card {card_id}")
         fid = int(card_id[1:])
@@ -636,6 +671,9 @@ class SessionService:
             db.commit()
             out = DecideOut(decision_id=dec.id, final_path=str(final) if final else None,
                             progress=self._progress(db, sid))
+        pipe = self.pipelines.get(sid)
+        if pipe is not None and body.action in ("pick", "inbox", "trash"):
+            pipe.note_decisions(1, 1 if body.action == "inbox" else 0)
         if removed_other is not None:
             self.publish(sid, "card_removed", card_id=f"d{removed_other}")
             self.publish(sid, "card_removed", card_id=f"m{removed_other}")
@@ -648,6 +686,8 @@ class SessionService:
             raise NotFound(f"card {card_id}")
         if not body.member_ids:
             raise BadRequest("member_ids required for batch cards")
+        if body.action == "suggest_folder" and kind == "i":
+            return self._suggest_folder(raw, body)
         if body.action not in ("confirm_all", "trash_all", "review", "reject_all"):
             raise BadRequest(f"unsupported batch action: {body.action}")
         tid = int(raw)
@@ -724,8 +764,378 @@ class SessionService:
         if skipped:
             self.publish(sid, "op_failed",
                          message=f"{len(skipped)} file(s) were in use and were skipped")
+        bpipe = self.pipelines.get(sid)
+        if bpipe is not None and moved_any:
+            n = len(body.member_ids) - len(skipped)
+            bpipe.note_decisions(n, n if body.action == "confirm_all" and kind == "i" else 0)
         self.publish(sid, "tree_changed" if moved_any else "progress")
         return out
+
+    # ---------- proposals (SPEC §6) ----------
+    def _live_members(self, pr: Proposal, files: dict[int | None, File]) -> list[File]:
+        """Members still undecided (or, for ones pooled from an _Inbox, still sitting there)."""
+        extra = json.loads(pr.taxonomy_json or "{}") if pr.kind == "folder" else {}
+        from_inbox = set(extra.get("from_inbox", []))
+        out: list[File] = []
+        for fid in json.loads(pr.member_file_ids_json):
+            f = files.get(fid)
+            if f is None:
+                continue
+            if fid in from_inbox:
+                if f.status == FileStatus.decided and Path(f.path).parent.name == INBOX_NAME:
+                    out.append(f)
+            elif f.status in SHOWABLE:
+                out.append(f)
+        return out
+
+    def _proposal_view(self, db: DB, sid: int, by_id: dict[int | None, File] | None = None
+                       ) -> tuple[list[tuple[Proposal, list[File]]], set[int], bool]:
+        """(pending proposals to show with their live members, hidden file ids, hold_all).
+        hold_all: a cold-start taxonomy is pending (or being computed) -> only it is shown."""
+        pipe = self.pipelines.get(sid)
+        computing = pipe is not None and pipe.cold_pending
+        pending = db.exec(select(Proposal).where(Proposal.session_id == sid,
+                                                 Proposal.status == "pending")).all()
+        if not pending and not computing:
+            return [], set(), False
+        mids = {i for pr in pending for i in json.loads(pr.member_file_ids_json)}
+        files: dict[int | None, File] = {i: by_id[i] for i in mids if by_id and i in by_id}
+        need = [i for i in mids if i not in files]
+        if need:  # only the members (card_for runs this per streamed card)
+            files.update((f.id, f) for f in db.exec(select(File).where(col(File.id).in_(need))))
+        shown: list[tuple[Proposal, list[File]]] = []
+        hidden: set[int] = set()
+        hold = computing
+        mc = self.settings.proposals.min_cluster
+        for pr in pending:
+            live = self._live_members(pr, files)
+            if pr.kind == "taxonomy":
+                if live:
+                    shown.append((pr, live))
+                    hold = True
+                continue
+            n0 = len(json.loads(pr.member_file_ids_json))
+            if len(live) < (1 if pr.singleton else min(mc, n0)):
+                continue  # members were decided one by one: the proposal is moot
+            shown.append((pr, live))
+            hidden.update(f.id for f in live if f.id is not None)
+        if hold:
+            hidden = {i for i in db.exec(select(File.id).where(File.session_id == sid)).all()
+                      if i is not None}
+        shown.sort(key=lambda t: (t[0].kind != "taxonomy", t[0].singleton, t[0].id or 0))
+        return shown, hidden, hold
+
+    def _hidden(self, db: DB, sid: int) -> set[int]:
+        return self._proposal_view(db, sid)[1]
+
+    @staticmethod
+    def _info(f: File) -> FileInfo:
+        assert f.id is not None
+        return FileInfo(id=f.id, name=Path(f.path).name, rel_path=f.rel_path, size=f.size,
+                        mtime=f.mtime, ext=f.ext, is_bundle=f.is_bundle)
+
+    def _proposal_card(self, pr: Proposal, live: list[File], db: DB, root: Path) -> Card:
+        assert pr.id is not None
+        if pr.kind == "taxonomy":
+            tax = json.loads(pr.taxonomy_json)
+            names: dict[int, str] = {f.id: Path(f.path).name for f in live if f.id is not None}
+
+            def node(n: dict[str, object]) -> TaxonomyNode:
+                kids = [node(c) for c in n["children"]]  # type: ignore[attr-defined]
+                mem = list(n["members"])  # type: ignore[call-overload]
+                count = len(mem) + sum(k.count for k in kids)
+                sample = [names[i] for i in mem if i in names][:4]
+                if not sample and kids:
+                    sample = [s for k in kids for s in k.sample][:4]
+                return TaxonomyNode(id=str(n["id"]), name=str(n["name"]), count=count,
+                                    sample=sample, children=kids)
+
+            nodes = [node(n) for n in tax["nodes"]]
+            total = len(json.loads(pr.member_file_ids_json))
+            n_folders = sum(1 + len(n.children) for n in nodes)
+            info = TaxonomyInfo(proposal_id=pr.id, nodes=nodes,
+                                inbox_count=len(tax.get("inbox", [])), total=total,
+                                named_by=pr.named_by)
+            return Card(
+                id=f"p{pr.id}", kind="taxonomy", file=self._info(live[0]), taxonomy=info,
+                reason=(f"Your output folder is empty. Proposed structure: {len(nodes)} top "
+                        f"folders ({n_folders} in all) for {total} files."),
+                edges={"right": Edge(label="Create these folders", action="accept"),
+                       "left": Edge(label="Dismiss", action="dismiss")},
+            )
+        parent = db.get(Folder, pr.parent_folder_id) if pr.parent_folder_id else None
+        prel = _rel(Path(parent.path), root) if parent is not None else ""
+        path = f"{prel}/{pr.name}" if prel else pr.name
+        ibx = f"{prel}/{INBOX_NAME}" if prel else INBOX_NAME
+        n = len(live)
+        files_word = "file" if n == 1 else "files"
+        reason = (f"This file looks like a new topic. Create {path}/ for it?" if pr.singleton
+                  else f"Create {path}/ for these {n} files?")
+        pinfo = ProposalInfo(
+            proposal_id=pr.id, name=pr.name, parent_folder_id=pr.parent_folder_id,
+            parent_path=prel, path=path, inbox_path=ibx, members=[self._info(f) for f in live],
+            cohesion=pr.cohesion, singleton=pr.singleton,
+            named_by=pr.named_by)
+        return Card(
+            id=f"p{pr.id}", kind="folder_proposal", file=pinfo.members[0], proposal=pinfo,
+            reason=reason, destination=path, confidence=pr.cohesion,
+            edges={"right": Edge(label=f"Create {path}/ & move {n} {files_word}",
+                                 action="accept"),
+                   "up": Edge(label=f"Send {n} to {ibx}/", action="inbox"),
+                   "left": Edge(label="Dismiss", action="dismiss")},
+        )
+
+    def proposal_card(self, pid: int) -> Card | None:
+        with DB(self.engine) as db:
+            pr = db.get(Proposal, pid)
+            if pr is None or pr.status != "pending":
+                return None
+            row = self._session(db, pr.session_id)
+            shown, _hidden, _hold = self._proposal_view(db, pr.session_id)
+            live = next((lv for p, lv in shown if p.id == pid), None)
+            if live is None:
+                return None
+            return self._proposal_card(pr, live, db, Path(row.output_root))
+
+    def _publish_proposals(self, sid: int, pids: list[int], new: bool) -> None:
+        for pid in pids:
+            card = self.proposal_card(pid)
+            if card is None:
+                continue
+            self.publish(sid, "card_ready" if new else "card_updated", card=card)
+            if new and card.proposal is not None:
+                with DB(self.engine) as db:
+                    for m in card.proposal.members:  # now part of the group card
+                        self.publish(sid, "card_removed", card_id=f"m{m.id}")
+                        sg = db.exec(select(Suggestion).where(
+                            Suggestion.file_id == m.id, Suggestion.kind == "classify")
+                            .order_by(col(Suggestion.id).desc())).first()
+                        if sg is not None and sg.stop_folder_id is not None:
+                            self.publish(sid, "card_removed", card_id=f"bi{sg.stop_folder_id}")
+
+    def _suggest_folder(self, raw: str, body: DecideIn) -> DecideOut:
+        """Inbox batch, Up: propose a new folder for these files anyway (SPEC §6.1 step 4)."""
+        assert body.member_ids
+        with DB(self.engine) as db:
+            first = db.get(File, body.member_ids[0])
+            if first is None:
+                raise NotFound(f"file {body.member_ids[0]}")
+            sid = first.session_id
+            stop = db.get(Folder, int(raw))
+            if stop is None or stop.session_id != sid:
+                raise NotFound(f"folder {raw}")
+            members = [db.get(File, i) for i in body.member_ids]
+            if any(m is None or m.session_id != sid or m.status != FileStatus.ready
+                   for m in members):
+                raise BadRequest("batch members changed; refresh cards")
+        pipe = self.pipelines.get(sid)
+        if pipe is None:
+            raise BadRequest("no pipeline for this session")
+        pid = pipe.force_proposal(list(body.member_ids), int(raw))
+        if pid is None:
+            raise BadRequest("could not build a proposal for these files")
+        self._publish_proposals(sid, [pid], True)
+        with DB(self.engine) as db:
+            return DecideOut(decision_id=0, final_path=None, progress=self._progress(db, sid))
+
+    def decide_proposal(self, pid: int, body: DecideIn) -> DecideOut:
+        with DB(self.engine) as db:
+            pr0 = db.get(Proposal, pid)
+            if pr0 is None:
+                raise NotFound(f"proposal {pid}")
+            sid = pr0.session_id
+        if body.action not in ("accept", "rename", "dismiss", "inbox"):
+            raise BadRequest(f"unsupported proposal action: {body.action}")
+        moved_any = False
+        skipped = 0
+        n_inboxed = 0
+        with self._lock(sid), DB(self.engine) as db:
+            row = self._session(db, sid)
+            root = Path(row.output_root)
+            pr = db.get(Proposal, pid)
+            assert pr is not None
+            if pr.status != "pending":
+                raise BadRequest("proposal already decided")
+            shown, _h, _hold = self._proposal_view(db, sid)
+            live = next((lv for p, lv in shown if p.id == pid), None)
+            if live is None:
+                raise BadRequest("proposal no longer applies; refresh cards")
+            if body.action == "rename":
+                self._apply_renames(pr, body)
+                db.add(pr)
+                db.commit()
+                out = DecideOut(decision_id=0, final_path=None,
+                                progress=self._progress(db, sid))
+                card = self._proposal_card(pr, live, db, root)
+                self.publish(sid, "card_updated", card=card)
+                return out
+            if body.action == "accept" and (body.name or body.renames):
+                self._apply_renames(pr, body)
+            if (body.action == "accept" and pr.kind == "taxonomy"
+                    and body.accepted_nodes is not None and not body.accepted_nodes):
+                raise BadRequest("select at least one folder")
+            action = {"accept": "taxonomy_accept" if pr.kind == "taxonomy"
+                      else "proposal_accept", "dismiss": "proposal_dismiss",
+                      "inbox": "proposal_inbox"}[body.action]
+            if pr.kind == "taxonomy" and body.action == "inbox":
+                raise BadRequest("a proposed structure has no inbox action")
+            was_decided = [f.id for f in live if f.status == FileStatus.decided]
+            dec = Decision(session_id=sid, action=action, latency_ms=body.latency_ms,
+                           payload_json=json.dumps({
+                               "proposal_id": pid, "members": [f.id for f in live],
+                               "was_decided": was_decided if body.action == "accept" else []}))
+            pr.status = {"accept": "accepted", "dismiss": "dismissed",
+                         "inbox": "inboxed"}[body.action]
+            db.add(pr)
+            db.add(dec)
+            db.commit()  # never hold a write lock while the executor journals
+            db.refresh(dec)
+            assert dec.id is not None
+            ex = self._executor(row)
+            pipe = self.pipelines.get(sid)
+            if body.action == "accept" and pr.kind == "taxonomy":
+                moved_any = self._accept_taxonomy(db, pr, body, dec, ex, root)
+            elif body.action == "accept":
+                parent = (db.get(Folder, pr.parent_folder_id) if pr.parent_folder_id else None)
+                parent_path = Path(parent.path) if parent is not None else root
+                made, fo, fresh = self._make_folder(db, sid, ex, parent_path / pr.name,
+                                                    root, dec.id)
+                dec.target_folder_id = fo.id
+                db.add(dec)
+                db.commit()
+                if pipe is not None and fresh:
+                    ids = [f.id for f in live if f.id is not None]
+                    pipe.on_folder_created(fo, _rel(made, root), seed=pipe.centroid_of(ids))
+                assert fo.id is not None
+                for m in live:
+                    assert m.id is not None
+                    try:
+                        final = ex.move(Path(m.path), made, decision_id=dec.id)
+                    except ExecError:
+                        skipped += 1
+                        continue
+                    moved_any = True
+                    m.path, m.status = str(final), FileStatus.decided
+                    db.add(m)
+                    fo.n_files += 1
+                    db.add(fo)
+                    db.add(IndexedFile(session_id=sid, folder_id=fo.id, path=str(final),
+                                       name=final.name, ext=m.ext, content_hash=m.content_hash,
+                                       file_id=m.id))
+                    db.commit()
+                    if pipe is not None:
+                        pipe.on_placed(m.id, fo.id, str(final))
+            elif body.action == "inbox":
+                parent = (db.get(Folder, pr.parent_folder_id) if pr.parent_folder_id else None)
+                inbox = self._inbox_folder(db, sid, root,
+                                           Path(parent.path) if parent is not None else None)
+                dec.target_folder_id = inbox.id
+                db.add(dec)
+                db.commit()
+                for m in live:
+                    if m.status != FileStatus.ready:
+                        continue  # already in an inbox
+                    try:
+                        final = ex.move(Path(m.path), Path(inbox.path), decision_id=dec.id)
+                    except ExecError:
+                        skipped += 1
+                        continue
+                    moved_any = True
+                    n_inboxed += 1
+                    m.path, m.status = str(final), FileStatus.decided
+                    db.add(m)
+                    db.commit()
+            if body.action != "dismiss" and not moved_any:
+                dec.undone = True  # nothing happened: no empty undo step
+                db.add(dec)
+            db.commit()
+            out = DecideOut(decision_id=dec.id, final_path=None, progress=self._progress(db, sid))
+        if skipped:
+            self.publish(sid, "op_failed",
+                         message=f"{skipped} file(s) were in use and were skipped")
+        if pipe is not None and n_inboxed:
+            pipe.note_decisions(n_inboxed, 0)  # never re-proposes the same group (dismissed)
+        if pipe is not None and body.action == "accept" and moved_any:
+            # new folders: rescore now (vector math only) so the cards the client fetches next
+            # already point into them; the background rescorer then finds nothing stale
+            pipe.rescore_stale()
+        self.publish(sid, "card_removed", card_id=f"p{pid}")
+        self.publish(sid, "tree_changed" if moved_any else "progress")
+        return out
+
+    def _apply_renames(self, pr: Proposal, body: DecideIn) -> None:
+        cfg = self.settings.proposals
+        if pr.kind == "taxonomy":
+            tax = json.loads(pr.taxonomy_json)
+            ren = body.renames or {}
+
+            def walk(nodes: list[dict[str, object]], taken: list[str]) -> None:
+                for n in nodes:
+                    if str(n["id"]) in ren:
+                        nm = naming.clean(ren[str(n["id"])], cfg)
+                        if nm is None:
+                            raise BadRequest(f"invalid folder name: {ren[str(n['id'])]!r}")
+                        n["name"] = nm
+                for n in nodes:
+                    if str(n["name"]).casefold() in {t.casefold() for t in taken}:
+                        raise BadRequest(f"duplicate folder name: {n['name']}")
+                    taken.append(str(n["name"]))
+                    walk(n["children"], [str(n["name"])])  # type: ignore[arg-type]
+
+            walk(tax["nodes"], [])
+            pr.taxonomy_json = json.dumps(tax)
+        else:
+            nm = naming.clean(body.name or "", cfg)
+            if nm is None:
+                raise BadRequest(f"invalid folder name: {body.name!r}")
+            pr.name = nm
+        pr.named_by = "user"
+
+    def _make_folder(self, db: DB, sid: int, ex: Executor, target: Path, root: Path,
+                     decision_id: int) -> tuple[Path, Folder, bool]:
+        """mkdir through the executor (journaled under `decision_id`); reuses an existing
+        folder (case-insensitive). Returns (path, Folder row, created_now)."""
+        made = ex.mkdir(target, decision_id=decision_id)
+        fo = db.exec(select(Folder).where(Folder.session_id == sid,
+                                          Folder.path == str(made))).first()
+        fresh = fo is None
+        if fo is None:
+            fo = self._add_folder(db, sid, made, root, "proposal")
+            db.commit()
+            db.refresh(fo)
+        return made, fo, fresh
+
+    def _accept_taxonomy(self, db: DB, pr: Proposal, body: DecideIn, dec: Decision,
+                         ex: Executor, root: Path) -> bool:
+        """Create the selected folders (one undo step); members are NOT moved: they come back
+        as ordinary cards scored against the new folders, whose profiles are seeded with the
+        cluster centroids (so the suggestions are confident from the first card)."""
+        assert dec.id is not None
+        tax = json.loads(pr.taxonomy_json)
+        sel = set(body.accepted_nodes) if body.accepted_nodes is not None else None
+        pipe = self.pipelines.get(pr.session_id)
+        created: list[tuple[Folder, str, Vec | None]] = []
+
+        def seed(ids: list[int]) -> Vec | None:
+            return pipe.centroid_of(ids) if pipe is not None else None
+
+        for node in tax["nodes"]:
+            kids = [k for k in node["children"] if sel is None or k["id"] in sel]
+            if sel is not None and node["id"] not in sel and not kids:
+                continue
+            made, fo, fresh = self._make_folder(db, pr.session_id, ex, root / node["name"],
+                                                root, dec.id)
+            members = list(node["members"]) + [i for k in kids for i in k["members"]]
+            if fresh:
+                created.append((fo, _rel(made, root), seed(members)))
+            for k in kids:
+                made2, fo2, fresh2 = self._make_folder(db, pr.session_id, ex,
+                                                       made / k["name"], root, dec.id)
+                if fresh2:
+                    created.append((fo2, _rel(made2, root), seed(list(k["members"]))))
+        if pipe is not None and created:
+            pipe.on_folders_created(created)
+        return bool(created)
 
     def undo(self, sid: int, steps: int = 1) -> UndoOut:
         undone_ops: list[int] = []
@@ -745,7 +1155,8 @@ class SessionService:
                 if ops:
                     ids = ex.undo(1)
                     undone_ops.extend(ids)
-                    for op in db.exec(select(Op).where(col(Op.id).in_(ids))).all():
+                    for op in db.exec(select(Op).where(col(Op.id).in_(ids))
+                                      .order_by(col(Op.id).desc())).all():
                         if op.type == OpType.trash:
                             for oix in db.exec(select(IndexedFile).where(
                                     IndexedFile.session_id == sid,
@@ -775,7 +1186,12 @@ class SessionService:
                                     pipe.on_folder_removed(fo.id)
                                 if self._last_target.get(sid) == fo.id:
                                     self._last_target.pop(sid, None)
+                                for ix in db.exec(select(IndexedFile).where(
+                                        IndexedFile.folder_id == fo.id)).all():
+                                    db.delete(ix)
+                                db.flush()
                                 db.delete(fo)
+                                db.flush()  # children before parents (self-referencing FK)
                 if dec.action == "pick" and dec.target_folder_id is not None:
                     tgt = db.get(Folder, dec.target_folder_id)
                     if tgt is not None:
@@ -796,6 +1212,17 @@ class SessionService:
                     if dsug is not None:
                         dsug.stale = False
                         db.add(dsug)
+                if dec.action in PROPOSAL_ACTIONS and dec.payload_json:
+                    pl = json.loads(dec.payload_json)
+                    pr = db.get(Proposal, pl.get("proposal_id", -1))
+                    if pr is not None:
+                        pr.status = "pending"  # the card comes back
+                        db.add(pr)
+                    for fid in pl.get("was_decided", []):  # members that came from an _Inbox
+                        wf = db.get(File, fid)
+                        if wf is not None:
+                            wf.status = FileStatus.decided
+                            db.add(wf)
                 if dec.action == "defer" and dec.file_id is not None:
                     f = db.get(File, dec.file_id)
                     if f is not None and f.status == FileStatus.skipped:

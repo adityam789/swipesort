@@ -12,8 +12,9 @@ export type Outcome = 'moved' | 'trashed' | 'deferred' | 'inbox' | 'kept'
 
 export function outcomeOf(action: Edge['action'], card?: Card): Outcome {
   if (action === 'trash' || action === 'trash_all') return 'trashed'
+  if (action === 'dismiss') return 'deferred' // proposal dropped: members come back as cards
   if (action === 'confirm_all') return card?.batch?.kind === 'inbox' ? 'inbox' : 'moved'
-  if (action === 'review' || action === 'reject_all') return 'deferred' // members come back as individual cards
+  if (action === 'review' || action === 'reject_all' || action === 'suggest_folder') return 'deferred' // members come back (as cards / a proposal)
   if (action === 'defer') return 'deferred'
   if (action === 'inbox') return 'inbox'
   if (action === 'keep_both' || action === 'keep_this') return 'kept' // file continues to classification
@@ -32,15 +33,42 @@ export function isBatchMutation(card: Card, action: Edge['action']): boolean {
 
 /** Batch actions that only hand the members back as individual cards (nothing to undo). */
 export function isBatchDismiss(card: Card, action: Edge['action']): boolean {
-  return !!card.batch && (action === 'review' || action === 'reject_all')
+  return !!card.batch && (action === 'review' || action === 'reject_all' || action === 'suggest_folder')
+}
+
+/** Cards that stand for several files (batch, folder proposal, proposed structure). */
+export function isGroup(card: Card): boolean {
+  return !!(card.batch || card.proposal || card.taxonomy)
+}
+
+/** Files shown on a group card (taxonomy cards list counts, not members). */
+export function membersOf(card: Card): number[] {
+  if (card.batch) return card.batch.members.map((m) => m.id)
+  if (card.proposal) return card.proposal.members.map((m) => m.id)
+  return []
+}
+
+/** Proposal decisions that move the members (they must not reappear as individual cards). */
+export function isProposalMutation(card: Card, action: Edge['action']): boolean {
+  return !!card.proposal && (action === 'accept' || action === 'inbox')
 }
 
 /** How many files one decision on this card affects. */
 export function weightOf(card: Card): number {
-  return card.batch ? card.batch.members.length : 1
+  if (card.taxonomy) return 0 // creates folders only; files come back as cards
+  return isGroup(card) ? membersOf(card).length : 1
+}
+
+/** Edits made on a proposal card before it is decided (sent along with accept). */
+export interface ProposalDraft {
+  name?: string
+  accepted_nodes?: string[]
+  renames?: Record<string, string>
 }
 
 function undoMessage(entry: UndoEntry): string {
+  if (entry.card.taxonomy) return 'Undid: proposed structure'
+  if (entry.card.proposal) return `Undid: ${entry.card.proposal.path}/`
   if (!entry.card.batch) return `Undid: ${truncate(entry.card.file.name)}`
   const n = entry.count
   if (entry.outcome === 'trashed') return `Undid ${n} trashed ${n === 1 ? 'file' : 'files'}`
@@ -97,6 +125,8 @@ export interface SessionState {
    * Applied only if that card comes back (undo); never swapped under the user's finger.
    */
   stashedUpdates: Record<number, Card>
+  /** In-card edits of proposal cards (name, selected nodes, renames), keyed by card id. */
+  drafts: Record<string, ProposalDraft>
 
   start: (session: SessionOut) => Promise<void>
   reset: () => void
@@ -120,6 +150,7 @@ export interface SessionState {
   togglePreview: () => void
   openDetails: () => void
   closeDetails: () => void
+  setDraft: (cardId: string, draft: ProposalDraft) => void
 }
 
 let keySeq = 0
@@ -166,6 +197,7 @@ const initial = () => ({
   shownAt: Date.now(),
   socketOpen: false,
   stashedUpdates: {} as Record<number, Card>,
+  drafts: {} as Record<string, ProposalDraft>,
 })
 
 export const useSession = create<SessionState>()((set, get) => ({
@@ -310,8 +342,18 @@ export const useSession = create<SessionState>()((set, get) => ({
       latency_ms: Math.max(0, Date.now() - state.shownAt),
     }
     if (card.batch) body.member_ids = card.batch.members.map((m) => m.id)
-    const memberIds = new Set(card.batch ? card.batch.members.map((m) => m.id) : [])
-    const consumed = isBatchMutation(card, edge.action)
+    const draft = state.drafts[card.id]
+    if (draft && edge.action === 'accept') {
+      if (card.proposal && draft.name?.trim()) body.name = draft.name.trim()
+      if (card.taxonomy) {
+        if (draft.accepted_nodes) body.accepted_nodes = draft.accepted_nodes
+        if (draft.renames && Object.keys(draft.renames).length) body.renames = draft.renames
+      }
+    }
+    const memberIds = new Set(membersOf(card))
+    const consumed = isBatchMutation(card, edge.action) || isProposalMutation(card, edge.action)
+    // Group cards whose outcome changes which cards exist (proposals, structure): refetch after.
+    const refetchAfter = dismiss || !!card.proposal || !!card.taxonomy
     // Optimistic advance: the next card shows immediately.
     set((s) => ({
       // Members of a confirmed/trashed batch must not reappear as individual cards.
@@ -329,9 +371,11 @@ export const useSession = create<SessionState>()((set, get) => ({
       toast: {
         id: toastId,
         kind: 'info',
-        message: card.batch
-          ? `${card.batch.members.length} ${card.batch.members.length === 1 ? 'file' : 'files'} → ${edge.label}`
-          : `${truncate(card.file.name)} → ${edge.label}`,
+        message: card.taxonomy
+          ? edge.label
+          : isGroup(card)
+            ? `${membersOf(card).length} ${membersOf(card).length === 1 ? 'file' : 'files'} → ${edge.label}`
+            : `${truncate(card.file.name)} → ${edge.label}`,
         undoable: !dismiss,
       },
     }))
@@ -345,7 +389,7 @@ export const useSession = create<SessionState>()((set, get) => ({
           treeVersion: s.treeVersion + 1,
           inFlightIds: without(s.inFlightIds, card.id),
         }))
-        if (dismiss) void get().fetchMore() // members are now individual "m<fid>" cards
+        if (refetchAfter) void get().fetchMore() // members are now individual "m<fid>" cards
       },
       (err) => {
         if (isBadRequest(err)) {
@@ -409,11 +453,11 @@ export const useSession = create<SessionState>()((set, get) => ({
     set((s) => {
       const deferredIds = new Set(s.deferredIds)
       deferredIds.delete(entry.card.id)
-      const stashed = entry.card.batch ? undefined : s.stashedUpdates[entry.card.file.id]
+      const stashed = isGroup(entry.card) ? undefined : s.stashedUpdates[entry.card.file.id]
       const back = stashed ?? entry.card
       deferredIds.delete(back.id)
       const stashedUpdates = { ...s.stashedUpdates }
-      if (!entry.card.batch) delete stashedUpdates[entry.card.file.id]
+      if (!isGroup(entry.card)) delete stashedUpdates[entry.card.file.id]
       return {
         stashedUpdates,
         queue: [back, ...s.queue.filter((c) => c.id !== entry.card.id && c.id !== back.id)],
@@ -437,7 +481,7 @@ export const useSession = create<SessionState>()((set, get) => ({
     } catch (err) {
       // Put things back the way they were.
       set((s) => ({
-        queue: s.queue.filter((c) => c.id !== entry.card.id && (entry.card.batch || c.file.id !== entry.card.file.id)),
+        queue: s.queue.filter((c) => c.id !== entry.card.id && (isGroup(entry.card) || c.file.id !== entry.card.file.id)),
         undoStack: [...s.undoStack, entry],
         counts: { ...s.counts, [entry.outcome]: s.counts[entry.outcome] + entry.count },
         duplicatesResolved: s.duplicatesResolved + entry.dupResolved,
@@ -476,6 +520,7 @@ export const useSession = create<SessionState>()((set, get) => ({
   togglePreview: () => set((s) => ({ previewOpen: s.queue.length ? !s.previewOpen : false })),
   openDetails: () => set((s) => (s.queue[0]?.duplicate ? { detailsOpen: true } : {})),
   closeDetails: () => set({ detailsOpen: false }),
+  setDraft: (cardId, draft) => set((s) => ({ drafts: { ...s.drafts, [cardId]: { ...s.drafts[cardId], ...draft } } })),
 }))
 
 function isBadRequest(e: unknown): boolean {
@@ -486,7 +531,7 @@ function isBadRequest(e: unknown): boolean {
 function deferWithStash(s: SessionState, card: Card, outcome: Outcome): Set<string> {
   if (outcome !== 'deferred') return s.deferredIds
   const ids = new Set(s.deferredIds).add(card.id)
-  const stashed = card.batch ? undefined : s.stashedUpdates[card.file.id]
+  const stashed = isGroup(card) ? undefined : s.stashedUpdates[card.file.id]
   if (stashed) ids.add(stashed.id)
   return ids
 }
@@ -499,15 +544,13 @@ type QueueState = Pick<SessionState, 'queue' | 'deferredIds' | 'inFlightIds' | '
  */
 function sameCard(a: Card, b: Card): boolean {
   if (a.id === b.id) return true
-  return !a.batch && !b.batch && a.file.id === b.file.id
+  return !isGroup(a) && !isGroup(b) && a.file.id === b.file.id
 }
 
 /** True for an individual card whose file was moved/trashed by a confirmed batch (until that is undone). */
 function isConsumed(s: Pick<SessionState, 'undoStack'>, card: Card): boolean {
-  if (card.batch) return false
-  return s.undoStack.some(
-    (u) => !!u.card.batch && u.outcome !== 'deferred' && u.card.batch.members.some((m) => m.id === card.file.id),
-  )
+  if (isGroup(card)) return false
+  return s.undoStack.some((u) => isGroup(u.card) && u.outcome !== 'deferred' && membersOf(u.card).includes(card.file.id))
 }
 
 /** card_ready: append in server order (duplicates stay ahead of everything else), never at the head. */
@@ -536,7 +579,7 @@ function cardUpdated(s: QueueState, card: Card): Partial<SessionState> {
     queue[idx] = card
     return { queue }
   }
-  const decided = !card.batch && s.undoStack.some((u) => !u.card.batch && u.card.file.id === card.file.id)
+  const decided = !isGroup(card) && s.undoStack.some((u) => !isGroup(u.card) && u.card.file.id === card.file.id)
   if (idx === 0 || decided) {
     // On screen (or decided and possibly coming back via undo): hold the update.
     return { stashedUpdates: { ...s.stashedUpdates, [card.file.id]: card } }

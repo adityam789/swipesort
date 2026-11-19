@@ -1653,7 +1653,10 @@ def _write(base: Path, rel: str, m: Made) -> None:
 
 
 def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
-             hard: bool = False) -> Manifest:
+             hard: bool = False, cold: bool = False) -> Manifest:
+    """cold=True (M5 cold start): same input/ as the default for these params, but output/ is
+    left empty (no category folders, no examples). The examples are still generated so the
+    random stream - and therefore every input file - is identical."""
     rng = random.Random(seed)
     gens = HARD_GENERATORS if hard else GENERATORS
     kinds = dict(KINDS)
@@ -1671,7 +1674,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
     if out.exists():
         shutil.rmtree(out)
     (out / "input").mkdir(parents=True)
-    for cat in categories:
+    (out / "output").mkdir(parents=True)
+    for cat in [] if cold else categories:
         (out / "output" / cat).mkdir(parents=True)
     manifest = Manifest(seed=seed, n=n, nested=nested, hard=hard, categories=sorted(categories))
 
@@ -1682,6 +1686,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
             for _ in range(slot.examples):
                 m = make_nested(rng, slot, cat, hard)
                 name = namer_out.claim(cat, _full_name(m))
+                if cold:
+                    continue
                 _write(out / "output", f"{cat}/{name}", m)
                 manifest.examples.append(Entry(rel_path=f"{cat}/{name}", category=cat, kind=m.kind))
     for kind, (cat, _) in ([] if nested else sorted(kinds.items())):
@@ -1689,6 +1695,8 @@ def generate(out: Path, n: int = 300, seed: int = 0, nested: bool = False,
         for _ in range(count):
             m = gens[kind](rng)
             name = namer_out.claim(cat, _full_name(m))
+            if cold:
+                continue
             _write(out / "output", f"{cat}/{name}", m)
             manifest.examples.append(Entry(rel_path=f"{cat}/{name}", category=cat, kind=kind))
 
@@ -1831,8 +1839,9 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--nested", action="store_true")
     ap.add_argument("--hard", action="store_true", help="realistic, ambiguous corpus")
+    ap.add_argument("--cold", action="store_true", help="empty output/ (M5 cold start)")
     a = ap.parse_args()
-    m = generate(a.out, a.n, a.seed, a.nested, a.hard)
+    m = generate(a.out, a.n, a.seed, a.nested, a.hard, a.cold)
     kinds: dict[str, int] = {}
     for e in m.entries:
         kinds[e.kind] = kinds.get(e.kind, 0) + 1

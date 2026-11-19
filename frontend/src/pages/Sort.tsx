@@ -82,7 +82,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
     onKey: act,
     onUndo: () => void undo(),
     onDefer: () => {
-      if (!card) return
+      if (!card || card.proposal || card.taxonomy) return // proposals have no "later"
       const edge = Object.values(card.edges).find((e) => e?.action === 'defer' || e?.action === 'review')
       decide(card, edge ?? DEFER_EDGE)
     },

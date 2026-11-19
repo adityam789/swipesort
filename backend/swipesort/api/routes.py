@@ -91,6 +91,16 @@ def decide(card_id: str, body: DecideIn, request: Request) -> DecideOut:
         raise _guard(e) from e
 
 
+@router.post("/proposals/{pid}/decide", response_model=DecideOut)
+def decide_proposal(pid: int, body: DecideIn, request: Request) -> DecideOut:
+    """SPEC §12: {action: accept|rename|dismiss|inbox, name?, accepted_nodes?, renames?}.
+    The same proposal is also decidable as card "p<pid>" via /api/cards/{id}/decide."""
+    try:
+        return svc(request).decide_proposal(pid, body)
+    except Exception as e:
+        raise _guard(e) from e
+
+
 @router.post("/sessions/{sid}/undo", response_model=UndoOut)
 def undo(sid: int, body: UndoIn, request: Request) -> UndoOut:
     try:

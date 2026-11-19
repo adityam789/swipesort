@@ -64,6 +64,7 @@ def run_eval(n: int = 300, seed: int = 0, nested: bool = False, provider: str = 
     settings = Settings()
     settings.models.provider = provider
     settings.batch.min_size = settings.batch.inbox_min_size = 10**9  # per-file accuracy
+    settings.proposals.enabled = False  # group cards (M5) are measured by run_cold_eval.py
     for section, values in (settings_patch or {}).items():
         for k, v in values.items():
             setattr(getattr(settings, section), k, v)

@@ -25,6 +25,7 @@ dependencies = [
   "fastembed>=0.9.1",
   "imagehash>=4.3.2",
   "datasketch>=2.0.0",
+  "scikit-learn>=1.5",
 ]
 
 [project.optional-dependencies]
@@ -57,7 +58,7 @@ plugins = ["pydantic.mypy"]
 exclude = ["tests/fixtures/"]
 
 [[tool.mypy.overrides]]
-module = ["send2trash.*", "xxhash.*", "blake3.*", "reportlab.*", "fastembed.*"]
+module = ["send2trash.*", "xxhash.*", "blake3.*", "reportlab.*", "fastembed.*", "sklearn.*"]
 ignore_missing_imports = true
 
 [tool.ruff]

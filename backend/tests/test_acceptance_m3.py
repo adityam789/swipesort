@@ -31,6 +31,7 @@ def _settings() -> Settings:
     s = Settings()
     s.models.provider = "fake"
     s.batch.min_size = s.batch.inbox_min_size = 10**9  # per-file test
+    s.proposals.enabled = False  # per-file cards (M5 group cards are tested in m5)
     return s
 
 

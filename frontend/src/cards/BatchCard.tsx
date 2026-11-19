@@ -5,7 +5,7 @@ import { KindChip, Reason } from './Insights'
 const THUMBS = 6
 const pct = (p: number) => `${Math.round(p * 100)}%`
 
-function Thumb({ file }: { file: FileInfo }) {
+export function Thumb({ file }: { file: FileInfo }) {
   const [failed, setFailed] = useState(false)
   return (
     <div

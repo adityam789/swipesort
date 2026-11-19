@@ -5,8 +5,12 @@ const CHIP: Record<string, string> = {
   choices: 'bg-sky-100 text-sky-800 dark:bg-sky-950 dark:text-sky-300',
   inbox: 'bg-amber-100 text-amber-800 dark:bg-amber-950 dark:text-amber-300',
   batch: 'bg-violet-100 text-violet-800 dark:bg-violet-950 dark:text-violet-300',
+  folder_proposal: 'bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300',
+  taxonomy: 'bg-teal-100 text-teal-800 dark:bg-teal-950 dark:text-teal-300',
   manual: 'bg-stone-100 text-stone-600 dark:bg-stone-800 dark:text-stone-400',
 }
+
+const LABEL: Record<string, string> = { folder_proposal: 'new folder', taxonomy: 'proposed structure' }
 
 export function KindChip({ kind }: { kind: CardKind }) {
   return (
@@ -15,7 +19,7 @@ export function KindChip({ kind }: { kind: CardKind }) {
       data-kind={kind}
       className={`inline-block rounded-full px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide ${CHIP[kind] ?? CHIP.manual}`}
     >
-      {kind}
+      {LABEL[kind] ?? kind}
     </span>
   )
 }

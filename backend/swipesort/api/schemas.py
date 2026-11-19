@@ -17,6 +17,9 @@ Action = Literal[
     "review",  # batch: dismiss the batch; members come back as individual cards
     "reject_all",  # batch: members come back as individual Choices cards (top pick demoted)
     "trash_all",  # batch: trash every member (one undo step)
+    "dismiss",  # proposal: drop it; members come back as individual cards
+    "rename",  # proposal: change the proposed name(s) without deciding
+    "suggest_folder",  # inbox batch: propose a new folder for these files anyway (SPEC §6.1)
 ]
 
 
@@ -103,11 +106,47 @@ class BatchInfo(BaseModel):
     min_confidence: float
 
 
+class ProposalInfo(BaseModel):
+    """Folder proposal (SPEC §6.1): create `path` and move `members` into it."""
+
+    proposal_id: int
+    name: str
+    parent_folder_id: int | None
+    parent_path: str  # relative to output_root, posix ("" = root): the descent stop node
+    path: str  # parent_path/name
+    inbox_path: str  # where Up sends the members instead
+    members: list[FileInfo]  # live members (decided ones drop out)
+    cohesion: float
+    singleton: bool = False  # a lone file that is clearly a new topic (lower priority)
+    named_by: Literal["fallback", "llm", "user"] = "fallback"
+
+
+class TaxonomyNode(BaseModel):
+    id: str  # stable node id ("0", "0.1"); used by accepted_nodes / renames
+    name: str
+    count: int  # files in this node's subtree
+    sample: list[str] = []  # a few member file names
+    children: list[TaxonomyNode] = []
+
+
+class TaxonomyInfo(BaseModel):
+    """Cold start "Proposed structure" (SPEC §6.2): 2 levels, 5-12 top folders."""
+
+    proposal_id: int
+    nodes: list[TaxonomyNode]
+    inbox_count: int  # files that fit nowhere (they stay unsorted for now)
+    total: int
+    named_by: Literal["fallback", "llm", "user"] = "fallback"
+
+
 class Card(BaseModel):
-    id: str  # "m<file_id>" for manual cards in M0
-    kind: Literal["manual", "confirm", "choices", "inbox", "duplicate", "batch", "proposal"]
+    id: str  # "m<file_id>" file cards, "d<fid>" duplicates, "b.." batches, "p<id>" proposals
+    kind: Literal["manual", "confirm", "choices", "inbox", "duplicate", "batch",
+                  "folder_proposal", "taxonomy"]
     duplicate: DuplicateInfo | None = None
     batch: BatchInfo | None = None
+    proposal: ProposalInfo | None = None
+    taxonomy: TaxonomyInfo | None = None
     destination: str | None = None  # M4: where Right/accept puts it, e.g. "Work/PayPal/_Inbox"
     file: FileInfo
     reason: str = ""
@@ -123,6 +162,9 @@ class DecideIn(BaseModel):
     target_folder_id: int | None = None
     member_ids: list[int] | None = None  # batch cards: the members shown to the user
     latency_ms: int = 0
+    name: str | None = None  # folder proposal: accept/rename with this name
+    accepted_nodes: list[str] | None = None  # taxonomy: node ids to create (None = all)
+    renames: dict[str, str] | None = None  # taxonomy: node id -> new name
 
 
 class DecideOut(BaseModel):

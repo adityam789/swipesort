@@ -53,6 +53,8 @@ export const api = {
   getFolders: (id: number) => request<FolderOut[]>(`/api/sessions/${id}/folders`),
   decide: (cardId: string, body: DecideIn) =>
     post<DecideOut>(`/api/cards/${encodeURIComponent(cardId)}/decide`, body),
+  decideProposal: (proposalId: number, body: DecideIn) =>
+    post<DecideOut>(`/api/proposals/${proposalId}/decide`, body),
   undo: (id: number, body: UndoIn) => post<UndoOut>(`/api/sessions/${id}/undo`, body),
   createFolder: (body: FolderCreate) => post<FolderOut>('/api/folders', body),
   browse: (path?: string) =>

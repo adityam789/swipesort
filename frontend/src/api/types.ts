@@ -19,6 +19,9 @@ export type Action =
   | 'review' // batch: dismiss the batch; members come back as individual cards
   | 'reject_all' // batch: members come back as individual Choices cards
   | 'trash_all' // batch: trash every member (one undo step)
+  | 'dismiss' // proposal: drop it; members come back as individual cards
+  | 'rename' // proposal: change the proposed name(s) without deciding
+  | 'suggest_folder' // inbox batch: propose a new folder for these files anyway
 
 export interface SessionCreate {
   input_root: string
@@ -85,7 +88,8 @@ export type CardKind =
   | 'inbox'
   | 'duplicate'
   | 'batch'
-  | 'proposal'
+  | 'folder_proposal'
+  | 'taxonomy'
 
 export interface Candidate {
   folder_id: number
@@ -117,11 +121,46 @@ export interface BatchInfo {
   min_confidence: number
 }
 
+export type NamedBy = 'fallback' | 'llm' | 'user'
+
+/** Folder proposal (SPEC §6.1): create `path` and move `members` into it. */
+export interface ProposalInfo {
+  proposal_id: number
+  name: string
+  parent_folder_id: number | null
+  parent_path: string // relative to output_root, posix ("" = root): the descent stop node
+  path: string // parent_path/name
+  inbox_path: string // where Up sends the members instead
+  members: FileInfo[]
+  cohesion: number
+  singleton: boolean
+  named_by: NamedBy
+}
+
+export interface TaxonomyNode {
+  id: string // stable node id ("0", "0.1"); used by accepted_nodes / renames
+  name: string
+  count: number
+  sample: string[]
+  children: TaxonomyNode[]
+}
+
+/** Cold start "Proposed structure" (SPEC §6.2). */
+export interface TaxonomyInfo {
+  proposal_id: number
+  nodes: TaxonomyNode[]
+  inbox_count: number
+  total: number
+  named_by: NamedBy
+}
+
 export interface Card {
   id: string
   kind: CardKind
   duplicate?: DuplicateInfo | null
   batch?: BatchInfo | null
+  proposal?: ProposalInfo | null
+  taxonomy?: TaxonomyInfo | null
   /** Where Right/accept puts the file, e.g. "Work/PayPal/_Inbox". */
   destination?: string | null
   file: FileInfo
@@ -139,6 +178,12 @@ export interface DecideIn {
   /** Batch cards: the members shown to the user, exactly as displayed. */
   member_ids?: number[] | null
   latency_ms?: number
+  /** Folder proposal: accept/rename with this name. */
+  name?: string | null
+  /** Taxonomy: node ids to create (omitted = all). */
+  accepted_nodes?: string[] | null
+  /** Taxonomy: node id -> new name. */
+  renames?: Record<string, string> | null
 }
 
 export interface DecideOut {
