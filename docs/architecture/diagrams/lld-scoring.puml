@@ -1,0 +1,45 @@
+@startuml lld-scoring
+!include _style.iuml
+title Scoring, descent & tiers for one file (LLD)
+
+start
+:file vector e (digest embedding);
+partition "Flat scoring over all folders (engine/scoring.py)" {
+  :s_centroid = cos(e, centroid of subtree)\n(empty folder: profile sim stands in);
+  :s_profile = cos(e, embed(path + description));
+  :s_knn = Σ sim of k nearest placed files in F\n(similarity-weighted, not a vote share);
+  :s_meta = extension prior + filename BM25\n(empty folder: average prior);
+  :raw(F) = w · [centroid, profile, knn, meta];
+  :add "none of these" option\nnull_raw = 0.25-quantile of how output files\nscore against the wrong folders;
+  :p = softmax(raw / T)\nT per provider (local 0.045, default 0.08);
+}
+partition "Descent (engine/descent.py, method = mass)" {
+  :node = output root;
+  while (child whose subtree holds ≥ τ_descend (0.75)\nof the leaf mass?) is (yes)
+    :node = that child\npath_conf ×= its mass;
+  endwhile (no)
+  if (node is a leaf?) then (yes)
+    :destination = node (reached_leaf);
+  else (no)
+    :destination = node/_Inbox\n"probably somewhere in node/";
+  endif
+}
+partition "Tier" {
+  if (conf ≥ 0.90 and p1 − p2 ≥ 0.10) then (yes)
+    :Confirm;
+  elseif (conf ≥ 0.60) then (yes)
+    :Choices (top 3);
+  else (no)
+    :Inbox → candidate for a\nnew-folder proposal (§6.1);
+  endif
+}
+partition "LLM rerank (async, optional)" {
+  :top-5 → {choice, alternates, reason};
+  if (agrees with argmax?) then (yes)
+    :confidence += agree_boost (0.05);
+  else (no)
+    :confidence = min(conf, 0.89)\nLLM pick first in Choices;
+  endif
+}
+stop
+@enduml

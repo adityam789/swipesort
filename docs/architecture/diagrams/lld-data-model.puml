@@ -1,0 +1,80 @@
+@startuml lld-data-model
+!include _style.iuml
+title SQLite data model — SCHEMA_VERSION 7 (LLD)
+hide methods
+hide circle
+
+class Session {
+  id
+  input_root · output_root
+  kind : manual | watch
+  status · config_json
+}
+class Folder {
+  id · path · parent_id
+  depth · is_leaf · is_inbox
+  description · n_files
+  created_by : existing|user|proposal|inbox
+}
+class File {
+  id · path · rel_path
+  is_bundle · size · mtime · mime · ext
+  quick_hash · content_hash
+  status : queued|ready|skipped|decided
+}
+class IndexedFile {
+  id · folder_id · path · name · ext
+  content_hash · file_id?
+  -- files already in the output tree --
+}
+class Suggestion {
+  id · file_id · kind
+  candidates_json · confidence · tier · reason
+  tree_version · index_version · stale
+  stop_folder_id · path_conf · reached_leaf
+  llm_json · llm_agrees · batch_ok
+}
+class Decision {
+  id · file_id? · action · target_folder_id
+  payload_json (batch / proposal members)
+  source : user | auto · undone · latency_ms
+}
+class Op {
+  id · decision_id · type : move|mkdir|trash|…
+  src · dst · status : intent|done|undone
+}
+class Proposal {
+  id · parent_folder_id · name
+  kind : folder | taxonomy
+  member_file_ids_json · taxonomy_json
+  cohesion · status · named_by
+}
+class Device {
+  id · token_hash (SHA-256)
+  name · user_agent · last_seen
+}
+class Extraction <<cache by content_hash>> {
+  digest_text · metadata_json · page_count
+}
+class Features <<cache by content_hash>> {
+  phash · dhash · minhash · text_len
+}
+class Embedding <<cache by (key, model)>> {
+  key : content_hash | folder-profile:sha1
+  dim · vec
+}
+
+Session "1" *-- "*" Folder
+Session "1" *-- "*" File
+Session "1" *-- "*" IndexedFile
+Session "1" *-- "*" Decision
+Session "1" *-- "*" Proposal
+Folder "1" o-- "*" Folder : parent
+Folder "1" o-- "*" IndexedFile
+File "1" *-- "*" Suggestion
+Decision "1" *-- "*" Op : one undo step
+File ..> Extraction : content_hash
+File ..> Features : content_hash
+File ..> Embedding : content_hash
+Proposal ..> Folder : parent (descent stop node)
+@enduml

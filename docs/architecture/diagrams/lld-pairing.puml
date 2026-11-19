@@ -1,0 +1,28 @@
+@startuml lld-pairing
+!include _style.iuml
+title M6 — phone pairing & LAN auth (LLD)
+
+actor "User at Mac" as U
+participant "Desktop UI\n(loopback)" as D
+participant "Daemon\n(0.0.0.0 with ~-~-lan)" as S
+participant "Phone" as Ph
+
+U -> D : Pair phone
+D -> S : POST /api/pair/start (loopback only)
+S -> S : code = 8 chars from secrets\n(alphabet without 0/O/1/I)\nstore sha256(code), expiry 5 min
+S --> D : {code, url = http://<lan-ip>:8765/pair?code=…}
+D -> U : QR of url
+Ph -> S : GET /pair?code=… (static PWA, no auth needed)
+Ph -> S : POST /api/pair {code}
+S -> S : constant-time compare of sha256\nsingle use · 5 fails / 5 min → 429
+S -> S : token = 256-bit random\nstore sha256(token) in Device
+S --> Ph : Set-Cookie (HttpOnly, SameSite=Strict, 180 days)
+Ph -> S : /api/* and WS with cookie
+S -> S : middleware: loopback → trusted\nelse valid token → allowed, else 401
+note right of S
+  Desktop only, even with a token (403):
+  pair/start, QR, devices, create session, fs browse.
+  Loopback requests must carry a local Host header
+  (DNS-rebinding guard).
+end note
+@enduml

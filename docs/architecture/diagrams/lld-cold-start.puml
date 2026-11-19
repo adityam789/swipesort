@@ -1,0 +1,30 @@
+@startuml lld-cold-start
+!include _style.iuml
+title Cold start — empty output tree → "Proposed structure" (LLD)
+
+start
+if (output has no indexed files and no subfolders\nand session is not a watch session?) then (yes)
+  :cold = true\ncards() shows only duplicates\nuntil the taxonomy exists;
+else (no)
+  :normal session;
+  stop
+endif
+:embed every input file (phase B);
+partition "engine/proposer.cold_start_taxonomy" {
+  :HDBSCAN on L2-normalised vectors\n(euclidean ≈ cosine) → leaf clusters;
+  :noise points join nearest leaf if\ncos ≥ threshold, else → _Inbox;
+  :merge over-split leaves while the\nmerged group stays cohesive;
+  :average-linkage on leaf centroids\n→ 5–12 top folders, depth ≤ 2;
+}
+partition "engine/naming" {
+  :fallback names now: c-TF-IDF keywords\n+ kind hints (EXIF → Photos, bundles → Code),\ngeneric names rejected, Windows-sanitised;
+  :Proposal(kind = taxonomy) → card;
+  :LLM renames in background\n(one call per top folder) → card_updated;
+}
+:user accepts all / a subset / edits names;
+:executor mkdir per folder — one decision_id\n→ one undo step;
+:on_folders_created: each folder profile seeded\nwith its cluster centroid (weight 0.8);
+:rescore_stale (sync) → files now score into\ntheir cluster's folder (Confirm mostly);
+:normal swiping;
+stop
+@enduml

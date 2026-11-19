@@ -1,0 +1,54 @@
+@startuml lld-lookahead
+!include _style.iuml
+title M3 — lookahead scheduler & streaming (LLD)
+
+participant "UI\n(Zustand queue)" as UI
+participant "SessionService" as Svc
+participant "Pipeline\nmain thread" as Main
+participant "ProcessPool\n(extract)" as Pool
+participant "Embedder\n(single-flight)" as Emb
+participant "Rerank thread" as RR
+database SQLite as DB
+participant EventBus as Bus
+
+== Phase A — CPU pass over every file (no model) ==
+Main -> Pool : hash + extract + features\n(output files first: they are the ground truth)
+Pool --> Main : content_hash, digest
+Main -> DB : Extraction / Features (cached by hash)
+Main -> Main : dedup → duplicate Suggestions
+Main -> Emb : folder profiles + output-tree files
+Main -> Main : build FolderIndex\n(centroid · profile · kNN set · ext prior)
+
+== Phase B — model pass in priority order ==
+note over Main
+  pending = duplicates first, then card order
+  target  = lookahead (15) + embed_batch (32)
+end note
+loop until every file is READY
+  Main -> DB : count READY (+skipped) = buffered
+  alt buffered < target
+    Main -> Main : size = urgent_batch (8)\nlow latency
+  else buffered ≥ target
+    Main -> Main : size = embed_batch (32)\nthroughput
+  end
+  Main -> Emb : embed chunk (cache hit = free)
+  Main -> Main : _suggest(): score → descent → tier
+  Main -> DB : Suggestion rows, status = READY, commit
+  Main -> Bus : "ready" [ids]
+  Bus -> UI : WS card events
+  Main -> RR : wake (rerank_wanted)
+end
+Main -> Main : proposer pass (§6)
+
+== Swiping (UI never waits on ML) ==
+UI -> UI : fling → advance optimistically
+UI -> Svc : POST decide (background)
+UI -> Svc : GET cards?limit=20 when queue runs low
+Svc -> DB : READY files ⨝ latest Suggestion\n(order: taxonomy · duplicates · proposals · batches · cards)
+Svc --> UI : precomputed cards (~17 ms)
+
+RR -> DB : next READY card near cursor without llm_json
+RR -> RR : LLM rerank top-5 (≈4–9 s on 7B)
+RR -> DB : agree → boost · disagree → cap < Confirm, LLM pick first
+RR -> Bus : "updated" [id]
+@enduml

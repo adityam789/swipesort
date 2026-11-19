@@ -1,0 +1,36 @@
+@startuml lld-watch
+!include _style.iuml
+title M7 — watch mode (LLD)
+
+participant "watchdog\n(FSEvents / ReadDirectoryChangesW)" as WD
+participant "Settler\n(injectable clock)" as ST
+participant "WatchService" as WS
+participant "SessionService" as Svc
+participant "Pipeline\n(persistent)" as P
+participant "policy.py" as Pol
+participant "platform" as Pl
+
+WD -> ST : created / modified / moved\n(mapped to top-level entry)
+ST -> ST : ignore *.crdownload *.part *.download *.tmp *.partial
+loop poll every settle_poll_seconds
+  ST -> ST : size & mtime unchanged ≥ settle_seconds?
+  ST -> Pl : is_locked(path)?\n(mac: flock NB · win: share-mode 0 open)
+end
+ST -> WS : settled(path)
+WS -> Svc : add_files → File rows (queued)
+Svc -> P : add_files(ids)
+P -> P : process_new: hash · extract · dedup · embed · score
+P -> WS : on_scored(ids)
+WS -> Pol : should_auto_move(conf, dup, decisions_so_far)
+alt conf ≥ 0.97 · not duplicate · auto_move on · ≥ 50 user decisions
+  WS -> Svc : decide(source = auto) → executor (journaled)
+  WS -> Pl : notify("Sorted x → Finance/Receipts", undo_url)
+else
+  WS -> WS : stays a READY card → pending badge
+end
+note over WD, WS
+  rescan every rescan_seconds catches dropped events and
+  files added while the daemon was down; one watch session
+  per (folder, output) pair, reused across restarts
+end note
+@enduml

@@ -1,0 +1,27 @@
+@startuml hld-pipeline
+!include _style.iuml
+title File lifecycle — from scan to decision (HLD)
+
+|Pipeline (background)|
+start
+:Scan input + output roots\n(skip hidden, symlinks, cloud placeholders;\nbundles = one unit);
+:Fingerprint\nsize → xxhash quick → BLAKE3;
+:Extract + digest (ProcessPool)\ncached by content_hash;
+:Dedup\nexact · pHash/dHash · MinHash · version-of;
+:Embed (single-flight, batched)\ncached by (key, model);
+:Score + descent\n→ Suggestion (tier, candidates, stop node);
+:File = READY;
+fork
+  :LLM rerank thread\n(ahead of cursor);
+fork again
+  :Proposer\n(low-confidence groups,\ncold-start taxonomy);
+end fork
+|UI (desktop / phone)|
+:GET cards → precomputed READY cards;
+:User flings card\n(right / left / up / down);
+|Daemon|
+:SessionService.decide\nDecision row, commit;
+:Executor: journal intent → act → done;
+:Pipeline hooks\non_placed → centroid / kNN update;
+stop
+@enduml

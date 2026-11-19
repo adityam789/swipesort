@@ -1,0 +1,44 @@
+@startuml lld-new-folder
+!include _style.iuml
+title New folder → re-rank (immediate) and re-cluster (triggered) (LLD)
+
+actor User
+participant SessionService as Svc
+participant Executor as Ex
+participant "Pipeline" as P
+participant "Rescore\n(sync or thread)" as RS
+participant "Rerank thread" as RR
+participant "Propose thread" as PR
+database SQLite as DB
+participant EventBus as Bus
+
+User -> Svc : accept proposal "Create Work/Onboarding/ for 5 files"\n(or manual create_folder)
+Svc -> DB : Decision row, commit
+Svc -> Ex : mkdir (journaled)
+Svc -> P : on_folder_created(folder, seed = members' centroid)
+P -> P : profile = norm(0.8·seed + 0.2·embed(name))\nadd FolderSpec, rebuild index
+P -> P : tree_version += 1
+P -> RS : request_rescore()
+loop each member
+  Svc -> Ex : move (journaled, same decision_id)
+  Svc -> P : on_placed → centroid + kNN include the file
+end
+Svc -> RS : rescore_stale() (sync on accept,\nso the next GET cards is fresh)
+
+group rescore_stale — every READY file whose suggestion has an old tree/index version
+  RS -> RS : _suggest() again (vector math only, ≈ ms)
+  alt top-3 set unchanged and LLM result exists
+    RS -> DB : keep LLM result, bump versions
+  else changed
+    RS -> DB : new candidates / tier / destination,\nclear llm_json
+    RS -> Bus : "updated" [ids] → card_updated
+  end
+  RS -> P : _withdraw_resolved(): a pending proposal\nwhose members are now ≥ 50 % non-inbox\n→ withdrawn, members back as cards
+end
+RR -> DB : picks cards with cleared llm_json\n(wakes every ≤ 2 s)
+
+group Re-clustering — NOT on folder creation (gap)
+  Svc -> P : note_decisions(n, inboxed)
+  P -> PR : every 25 decisions or 8 new inbox files\n→ propose(): pool inbox-tier + _Inbox files,\nHDBSCAN per stop node, new proposals
+end
+@enduml

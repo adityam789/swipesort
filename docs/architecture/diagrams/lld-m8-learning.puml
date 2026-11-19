@@ -1,0 +1,29 @@
+@startuml lld-m8-learning
+!include _style.iuml
+title M8 — learning loop (PLANNED, not built yet)
+
+start
+:every Decision stores the shown suggestion,\nits confidence, tier and the user's action;
+fork
+  partition "Calibration" {
+    :after ≥ 200 decisions: pairs\n(raw confidence, accepted?);
+    :fit isotonic regression\n(monotone map raw → P(accept));
+    :refit on demand / nightly;
+    :tiers and watch auto-move use\ncalibrated confidence;
+  }
+fork again
+  partition "Decision-driven weights" {
+    :features per decision = signal values\n(centroid, profile, kNN, meta, LLM agree);
+    :fit weights (e.g. logistic regression)\nfrom chosen vs rejected candidates;
+    :replace config weights when held-out\naccuracy improves; keep config as prior;
+  }
+fork again
+  partition "Rules" {
+    :mine consistent patterns:\nfilename token → folder,\ndownload source (paypal.com) → folder;
+    :suggest a rule card\n"always X → Y?";
+    :accepted rules short-circuit scoring\n(confidence = rule confidence);
+  }
+end fork
+:acceptance: after 200 decisions,\nConfirm-tier accept rate ≥ 95 %;
+stop
+@enduml

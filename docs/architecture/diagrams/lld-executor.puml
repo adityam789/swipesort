@@ -1,0 +1,22 @@
+@startuml lld-executor
+!include _style.iuml
+title Executor — journaled ops, undo, crash recovery (LLD)
+
+state "intent" as I : Op row written\nbefore touching the FS
+state "done" as D : FS change performed\n(rename, or copy → BLAKE3 verify → unlink\nacross volumes)
+state "undone" as U : reverse op performed
+state "failed" as F : locked file: retry, then skip\n(never forced)
+
+[*] --> I : move / mkdir / trash\n(decision_id)
+I --> D : perform + commit
+I --> F : error
+I --> D : recover() at startup:\nFS already changed
+I --> [*] : recover(): FS untouched\n→ discard intent
+D --> U : undo(steps) — LIFO by decision_id\nundo_decision(id) — targeted (watch);\nrefused if a later op moved the file\nor filled a folder it created
+U --> [*]
+note right of D
+  trash = move to <output>/.swipesort/trash/<sid>/
+  purge_trash() is the only hard delete
+  names sanitised for Windows; collisions → " (2)"
+end note
+@enduml

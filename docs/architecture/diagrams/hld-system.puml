@@ -1,0 +1,55 @@
+@startuml hld-system
+!include _style.iuml
+title SwipeSort — system context (HLD)
+left to right direction
+
+actor User
+node "Desktop browser\n(localhost, trusted)" as Desk
+node "Phone browser — PWA\n(LAN, device-token cookie)" as Phone
+
+node "Computer holding the files" {
+  component "FastAPI daemon\nswipesort serve [~-~-lan] [~-~-watch]" as API {
+    component "Auth middleware\nloopback | device token" as Auth
+    component "REST + WebSocket\n/api/*, /sessions/{id}/stream" as Routes
+    component "SessionService\ncards · decide · undo · proposals" as Svc
+    component "EventBus" as Bus
+  }
+  component "SessionPipeline (per session)\nthreads: main · rescore · rerank · propose" as Pipe
+  component "Engine (pure functions)\nscoring · descent · dedup · batching · proposer · naming" as Eng
+  component "Executor\njournal intent → done" as Exec
+  component "Watch service\nwatchdog + settle + policy" as Watch
+  component "platform/\nmacOS · Windows · fallback" as Plat
+  database "SQLite (WAL)\n~~/.swipesort/swipesort.db" as DB
+  folder "Input root" as In
+  folder "Output root\n+ .swipesort/trash" as Out
+  folder "Watched folders\n(e.g. Downloads)" as WF
+  component "Embedding provider\nfastembed bge-small (ONNX) | fake" as Emb
+}
+node "Ollama (optional)\nqwen2.5 7b / 3b" as Ollama
+node "OS services\nnotifications · launchd / Task Scheduler" as OS
+
+User --> Desk
+User --> Phone
+Desk --> Auth : HTTP/WS
+Phone --> Auth : HTTP/WS (LAN)
+Auth --> Routes
+Routes --> Svc
+Svc --> Pipe : hooks (on_placed,\non_folder_created, …)
+Pipe --> Bus : ready / updated /\nproposals events
+Bus --> Routes : WS push
+Pipe --> Eng
+Pipe --> Emb
+Pipe --> Ollama : rerank · naming
+Svc --> Exec : move · mkdir · trash · undo
+Watch --> Svc : add_files · auto-decide
+Watch ..> WF : FS events
+Exec --> In
+Exec --> Out
+Pipe ..> In : read only
+Pipe ..> Out : read only
+Svc --> DB
+Pipe --> DB
+Exec --> DB : ops journal
+Plat --> OS
+Watch --> Plat : is_locked · notify
+@enduml
