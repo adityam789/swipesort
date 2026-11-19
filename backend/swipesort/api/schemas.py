@@ -20,7 +20,7 @@ Action = Literal[
     "trash_all",  # batch: trash every member (one undo step)
     "dismiss",  # proposal: drop it; members come back as individual cards
     "rename",  # proposal: change the proposed name(s) without deciding
-    "suggest_folder",  # inbox batch: propose a new folder for these files anyway (SPEC §6.1)
+    "suggest_folder",  # inbox batch: propose a new folder for these files anyway
 ]
 
 
@@ -45,7 +45,7 @@ class SessionOut(BaseModel):
     progress: Progress
     live: bool = True  # pipeline running in this daemon (False: left over from an earlier run)
     created_at: datetime | None = None
-    kind: str = "manual"  # manual | watch (a watched folder's pending queue, SPEC §18)
+    kind: str = "manual"  # manual | watch (a watched folder's pending queue)
 
 
 class TreeNode(BaseModel):
@@ -111,7 +111,7 @@ class BatchInfo(BaseModel):
 
 
 class ProposalInfo(BaseModel):
-    """Folder proposal (SPEC §6.1): create `path` and move `members` into it."""
+    """Folder proposal: create `path` and move `members` into it."""
 
     proposal_id: int
     name: str
@@ -134,7 +134,7 @@ class TaxonomyNode(BaseModel):
 
 
 class TaxonomyInfo(BaseModel):
-    """Cold start "Proposed structure" (SPEC §6.2): 2 levels, 5-12 top folders."""
+    """Cold start "Proposed structure": 2 levels, 5-12 top folders."""
 
     proposal_id: int
     nodes: list[TaxonomyNode]
@@ -205,7 +205,7 @@ class BrowseOut(BaseModel):
 
 
 class StreamEvent(BaseModel):
-    """WS /api/sessions/{id}/stream (SPEC §7, §12). One JSON object per message."""
+    """WS /api/sessions/{id}/stream. One JSON object per message."""
 
     type: Literal["card_ready", "card_updated", "card_removed", "tree_changed", "progress",
                   "op_failed", "hello", "auto_sorted"]
@@ -216,7 +216,7 @@ class StreamEvent(BaseModel):
     decision_id: int | None = None  # auto_sorted: undo with POST /api/decisions/{id}/undo
 
 
-# ---------- watch mode (SPEC §18) ----------
+# ---------- watch mode ----------
 class WatchFolderIn(BaseModel):
     path: str  # the watched folder (e.g. ~/Downloads)
     output: str  # the output tree its files are sorted into

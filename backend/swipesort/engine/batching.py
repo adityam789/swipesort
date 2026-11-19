@@ -1,4 +1,4 @@
-"""Batch cards (SPEC §1 #4, §2.2 Batch row). Pure.
+"""Batch cards. Pure.
 
 CONTRACT (implemented by the descent agent):
 

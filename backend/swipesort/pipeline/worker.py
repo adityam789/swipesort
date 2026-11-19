@@ -1,4 +1,4 @@
-"""Background pipeline for one session (SPEC §7, M1 version).
+"""Background pipeline for one session.
 
 fingerprint -> extract (process pool) -> digest -> embed (single-flight) -> score -> READY.
 Runs in a daemon thread so the API never blocks on ML. M3 replaces the linear order with a
@@ -69,7 +69,7 @@ class SessionPipeline:
                  provider: Provider, session_id: int, llm: LLM | None = None,
                  use_llm: bool = True, persistent: bool = False) -> None:
         self.engine = engine
-        # persistent (watch sessions, SPEC §18): after the first pass the pipeline stays up
+        # persistent (watch sessions): after the first pass the pipeline stays up
         # and processes files handed to add_files(); no cold-start taxonomy (cards never wait)
         self.persistent = persistent
         self._incoming: queue.Queue[list[int]] = queue.Queue()
@@ -96,7 +96,7 @@ class SessionPipeline:
         self._null_samples: list[tuple[Vec, list[str], str, int]] = []
         self._placed: dict[str, scoring.PlacedVec] = {}  # key: indexed path
         self._vecs: dict[int, Vec] = {}  # input file id -> vec
-        # invalidation (SPEC §7): suggestions carry the versions they were computed at
+        # invalidation: suggestions carry the versions they were computed at
         self.tree_version = 0  # bumped on folder mkdir/rename/remove
         self.index_version = 0  # bumped every `index_bump_every` moves into one folder
         self._moves_into: dict[int, int] = {}
@@ -113,7 +113,7 @@ class SessionPipeline:
         if pov:  # per-embedding-model similarity thresholds (same pattern as temperature)
             self.settings = settings = settings.model_copy(
                 update={"proposals": pc.model_copy(update=pov)})
-        # M5 proposals (SPEC §6): cold start = empty output tree -> one taxonomy card; while it
+        # M5 proposals: cold start = empty output tree -> one taxonomy card; while it
         # is being computed, individual cards are held back (cards() checks cold_pending)
         self.cold = False
         self.cold_pending = False
@@ -133,7 +133,7 @@ class SessionPipeline:
                                         daemon=True)
         self._rescorer = threading.Thread(target=self._rescore_loop,
                                           name=f"rescore-{session_id}", daemon=True)
-        # LLM rerank (SPEC §3): runs ahead of the cursor on READY cards, never blocks them
+        # LLM rerank: runs ahead of the cursor on READY cards, never blocks them
         # tests / offline (fake embeddings) never talk to a real LLM unless one is injected
         self.llm: LLM | None = llm if llm is not None else (
             get_llm(settings) if use_llm and settings.models.provider != "fake" else None)
@@ -338,7 +338,7 @@ class SessionPipeline:
                     db.add(ix)
             db.commit()
 
-            # 3b. duplicates (SPEC §5) -> duplicate suggestions; shown before classification
+            # 3b. duplicates -> duplicate suggestions; shown before classification
             self._dedup(db, order, indexed, hashes,
                         only={f"f:{f.id}" for f in order if f.status == FileStatus.queued})
 
@@ -380,7 +380,7 @@ class SessionPipeline:
                                            ix.folder_id))
             self._rebuild_index()
 
-            # 6. lookahead scheduler (SPEC §7): embed + score inputs in priority order, in
+            # 6. lookahead scheduler: embed + score inputs in priority order, in
             #    small batches, so the first READY cards appear within seconds. Priority =
             #    distance from the user's cursor in card order: duplicates first, then card
             #    order. Remaining work continues at idle priority until everything is READY.
@@ -413,7 +413,7 @@ class SessionPipeline:
                 self._after_scored(ready)
                 self._rerank_wanted.set()
 
-        # 7. proposals (SPEC §6): every file is scored; group what couldn't be placed (or, on
+        # 7. proposals: every file is scored; group what couldn't be placed (or, on
         #    an empty output tree, propose a whole structure). Cards keep streaming meanwhile.
         if self.settings.proposals.enabled and not self._stop.is_set():
             try:
@@ -594,7 +594,7 @@ class SessionPipeline:
             if sc.use_null and len(self._null_samples) >= sc.null_min_samples else None)
 
     def _suggest(self, f: File, vec: Vec) -> Suggestion:
-        """Flat leaf scores give the alternatives (Choices); confidence-gated descent (SPEC §4)
+        """Flat leaf scores give the alternatives (Choices); confidence-gated descent
         gives the destination and the path confidence."""
         assert f.id is not None
         tokens = tokenize_name(Path(f.path).name)
@@ -815,7 +815,7 @@ class SessionPipeline:
                 top_new = [c["folder_id"] for c in json.loads(new.candidates_json)[:3]]
                 old.tree_version, old.index_version = new.tree_version, new.index_version
                 if old.llm_json and set(top_old) == set(top_new):
-                    db.add(old)  # SPEC §7: the LLM reruns only if the top 3 changed
+                    db.add(old)  # the LLM reruns only if the top 3 changed
                     continue
                 if top_old != top_new or old.tier != new.tier:
                     changed.append(f.id)
@@ -832,7 +832,7 @@ class SessionPipeline:
         with self._lock:
             recluster, self._recluster_after_rescore = self._recluster_after_rescore, False
         if recluster and self.settings.proposals.enabled:
-            # SPEC §6.1 step 5: a new folder changes what "doesn't fit" means. Files that are
+            # a new folder changes what "doesn't fit" means. Files that are
             # still low-confidence after the rescore are re-clustered now, not at the next
             # every_decisions / inbox_trigger tick.
             self.request_proposals()
@@ -841,7 +841,7 @@ class SessionPipeline:
     def _withdraw_resolved(self) -> None:
         """After a rescore (e.g. a new folder exists), a pending folder proposal whose members
         mostly got confident suggestions is superseded: withdraw it, its members come back as
-        ordinary cards (SPEC §6.1 step 5)."""
+        ordinary cards."""
         gone: list[int] = []
         back: list[int] = []
         with self._propose_lock, DB(self.engine) as db:
@@ -908,8 +908,7 @@ class SessionPipeline:
 
     def on_folders_created(self, items: list[tuple[Folder, str, Vec | None]]) -> None:
         """New folders, one tree_version bump. `seed` (a proposal's member centroid) is mixed
-        into the profile so the new folder scores like the cluster it came from (SPEC §6.1
-        step 5: the remaining low-confidence files are re-scored and may now land in it)."""
+        into the profile so the new folder scores like the cluster it came from."""
         texts: list[tuple[str, str]] = []
         for folder, rel, _seed in items:
             ptxt = profile_text(rel, folder.description)
@@ -948,10 +947,10 @@ class SessionPipeline:
             self.tree_version += 1
         self.request_rescore()
 
-    # ------------------------------------------------------------------ proposals (SPEC §6)
+    # ------------------------------------------------------------------ proposals
     def note_decisions(self, n: int = 1, inboxed: int = 0) -> None:
         """Called by the service after decisions: re-run the proposer every N decisions or when
-        the inboxes grew past `inbox_trigger` (SPEC §6.2)."""
+        the inboxes grew past `inbox_trigger`."""
         pc = self.settings.proposals
         if not pc.enabled:
             return
@@ -1063,7 +1062,7 @@ class SessionPipeline:
         return fi.centroid if fi.centroid is not None and fi.n_files > 0 else fi.profile
 
     def _propose_routing(self) -> list[int]:
-        """SPEC §6.1: pool every < tiers.choices file (plus §6.2: files sitting in _Inbox
+        """pool every < tiers.choices file (plus files sitting in _Inbox
         folders), cluster per descent stop node, and turn qualifying groups into proposals."""
         pc = self.settings.proposals
         root = self._root_id()
@@ -1184,7 +1183,7 @@ class SessionPipeline:
             return ids
 
     def force_proposal(self, file_ids: list[int], key: int) -> int | None:
-        """"Suggest a new folder anyway" on an inbox card (SPEC §6.1 step 4): skip the cohesion
+        """"Suggest a new folder anyway" on an inbox card: skip the cohesion
         and sibling checks, keep the naming."""
         pc = self.settings.proposals
         with self._propose_lock, DB(self.engine) as db:

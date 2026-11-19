@@ -22,7 +22,7 @@ function Toggle({ label, checked, onChange, disabled }: { label: string; checked
   )
 }
 
-/** "Auto-move unlocks after 50 decisions: 12/50" (SPEC §18 safety). */
+/** "Auto-move unlocks after 50 decisions: 12/50". */
 export function SafetyStatus({ cfg }: { cfg: WatchConfig }) {
   const { decisions, min_decisions_for_auto: min, auto_unlocked } = cfg.safety
   if (!cfg.auto_move) return <p data-testid="safety" className="text-sm text-stone-500">Auto-move is off: every new file becomes a card.</p>

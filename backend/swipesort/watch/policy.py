@@ -1,4 +1,4 @@
-"""What happens to a newly scored file in a watched folder (SPEC §18). Pure function."""
+"""What happens to a newly scored file in a watched folder. Pure function."""
 
 from __future__ import annotations
 
@@ -17,7 +17,7 @@ class Verdict(BaseModel):
 
 
 def auto_unlocked(cfg: Watch, decisions: int) -> bool:
-    """Safety (SPEC §18): no automatic action until the user made enough decisions for the
+    """Safety: no automatic action until the user made enough decisions for the
     confidence calibration to mean something."""
     return decisions >= cfg.min_decisions_for_auto
 

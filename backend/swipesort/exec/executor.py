@@ -1,4 +1,4 @@
-"""The ONLY module allowed to mutate the filesystem (CLAUDE.md hard rule).
+"""The ONLY module allowed to mutate the filesystem (see CONTRIBUTING.md).
 
 Every mutation is journaled: an Op row is written with status=intent, the action is performed,
 then the row is flipped to done (or failed). Undo replays done ops LIFO in reverse.

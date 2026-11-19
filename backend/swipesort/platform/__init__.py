@@ -1,4 +1,4 @@
-"""OS abstraction layer. The only package allowed to inspect sys.platform (SPEC §10)."""
+"""OS abstraction layer. The only package allowed to inspect sys.platform."""
 
 from __future__ import annotations
 

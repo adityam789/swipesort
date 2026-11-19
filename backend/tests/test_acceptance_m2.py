@@ -1,4 +1,4 @@
-"""M2 acceptance through the API (SPEC §14): duplicate cards come first, exact dupes are all
+"""M2 acceptance through the API: duplicate cards come first, exact dupes are all
 found and are true byte-identical copies, and keep_this / keep_both are undoable.
 Recall/precision on the full corpus is measured by eval/run_dedup_eval.py (also asserted)."""
 

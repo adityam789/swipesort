@@ -63,7 +63,7 @@ from swipesort.platform.base import Platform
 REMAINING = (FileStatus.queued, FileStatus.ready, FileStatus.skipped)
 SHOWABLE = (FileStatus.ready, FileStatus.skipped)
 INBOX_NAME = "_Inbox"
-# not a placement judgement: excluded from the auto-move safety count (SPEC §18)
+# not a placement judgement: excluded from the auto-move safety count
 USER_DECISION_SKIP = ("mkdir", "defer", "review", "proposal_dismiss")
 PROPOSAL_ACTIONS = ("proposal_accept", "proposal_inbox", "proposal_dismiss", "taxonomy_accept")
 
@@ -201,7 +201,7 @@ class SessionService:
         pipe.start()
         return pipe
 
-    # ---------- watch sessions (SPEC §18) ----------
+    # ---------- watch sessions ----------
     def open_watch_session(self, input_root: str, output_root: str,
                            on_scored: Callable[[list[int]], None] | None = None) -> int:
         """The long-lived session of one watched folder + output tree: created once, reused
@@ -283,7 +283,7 @@ class SessionService:
 
     def user_decision_count(self) -> int:
         """Decisions the user made (all sessions; undone and automatic ones excluded), counted
-        per file for batch/proposal decisions. Gates watch mode's auto actions (SPEC §18)."""
+        per file for batch/proposal decisions. Gates watch mode's auto actions."""
         n = 0
         with DB(self.engine) as db:
             for action, file_id, payload in db.execute(
@@ -490,7 +490,7 @@ class SessionService:
     def _resolve_other(self, db: DB, key: str, row: SessionRow
                        ) -> tuple[Path, str, str, str] | None:
         """(current path, rel path, side, preview url) of a duplicate's other copy, or None if
-        it no longer exists / was trashed (lazy invalidation, SPEC §5)."""
+        it no longer exists / was trashed (lazy invalidation)."""
         kind, _, raw = key.partition(":")
         out_root, in_root = Path(row.output_root), Path(row.input_root)
         if kind == "f":
@@ -561,7 +561,7 @@ class SessionService:
             by_id = {f.id: f for f in files}
             ranked = sorted(files, key=key)
             rank = {f.id: i for i, f in enumerate(ranked)}
-            # SPEC §2.3: duplicates first (cheapest wins), then batches, then individual cards.
+            # duplicates first (cheapest wins), then batches, then individual cards.
             # Duplicate cards are built lazily (stat + lookups), only until the page is full.
             dup_sugs = sorted(
                 (sg for sg in db.exec(select(Suggestion).where(
@@ -663,7 +663,7 @@ class SessionService:
             "down": Edge(label=f"Trash all {n}", action="trash_all"),
         }
         if kind != "move" and self.settings.proposals.enabled:
-            # SPEC §6.1: "send them to Work/_Inbox/?" -> Up suggests a new folder anyway
+            # "send them to Work/_Inbox/?" -> Up suggests a new folder anyway
             edges["up"] = Edge(label="Suggest a new folder", action="suggest_folder")
             edges["left"] = Edge(label="Show each file separately", action="review")
         return Card(
@@ -674,7 +674,7 @@ class SessionService:
         )
 
     def _inbox_folder(self, db: DB, sid: int, root: Path, parent: Path | None = None) -> Folder:
-        """`_Inbox/` under `parent` (default: output root), created lazily (SPEC §4)."""
+        """`_Inbox/` under `parent` (default: output root), created lazily."""
         path = (parent or root) / INBOX_NAME
         fo = db.exec(select(Folder).where(Folder.session_id == sid,
                                           Folder.path == str(path))).first()
@@ -685,7 +685,7 @@ class SessionService:
         return fo
 
     def decide(self, card_id: str, body: DecideIn, source: str = "user") -> DecideOut:
-        """`source` is "auto" for watch mode's automatic moves (SPEC §18)."""
+        """`source` is "auto" for watch mode's automatic moves."""
         if card_id[:1] == "b":
             return self.decide_batch(card_id, body)
         if card_id[:1] == "p" and card_id[1:].isdigit():
@@ -891,7 +891,7 @@ class SessionService:
         self.publish(sid, "tree_changed" if moved_any else "progress")
         return out
 
-    # ---------- proposals (SPEC §6) ----------
+    # ---------- proposals ----------
     def _live_members(self, pr: Proposal, files: dict[int | None, File]) -> list[File]:
         """Members still undecided (or, for ones pooled from an _Inbox, still sitting there)."""
         extra = json.loads(pr.taxonomy_json or "{}") if pr.kind == "folder" else {}
@@ -1034,7 +1034,7 @@ class SessionService:
                             self.publish(sid, "card_removed", card_id=f"bi{sg.stop_folder_id}")
 
     def _suggest_folder(self, raw: str, body: DecideIn) -> DecideOut:
-        """Inbox batch, Up: propose a new folder for these files anyway (SPEC §6.1 step 4)."""
+        """Inbox batch, Up: propose a new folder for these files anyway."""
         assert body.member_ids
         with DB(self.engine) as db:
             first = db.get(File, body.member_ids[0])

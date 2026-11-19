@@ -1,20 +1,13 @@
 # Contributing
 
-Thanks for helping. Read [SPEC.md](SPEC.md) for product behavior and [CLAUDE.md](CLAUDE.md)
-for the hard rules. The rules apply to every change, whoever or whatever writes it.
+Thanks for helping. [docs/architecture](docs/architecture/HLD.md) explains how the code fits together.
+The rules below apply to every change.
 
-## Setup
-
-```bash
-cd backend && uv sync
-cd frontend && npm ci
-```
-
-## Before opening a PR
+## Setup and checks
 
 ```bash
-cd backend  && uv run pytest && uv run mypy swipesort && uv run ruff check .
-cd frontend && npm test -- --run && npx tsc -b && npx oxlint && npm run build
+make setup        # Windows: .\scripts\swipesort.ps1 setup
+make test lint    # run before opening a PR
 ```
 
 CI runs the same checks on **macOS and Windows**. A change isn't done until both pass.

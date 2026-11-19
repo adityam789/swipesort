@@ -1,4 +1,4 @@
-"""Per-session event fan-out from worker threads to WebSocket clients (SPEC §7, §12)."""
+"""Per-session event fan-out from worker threads to WebSocket clients."""
 
 from __future__ import annotations
 

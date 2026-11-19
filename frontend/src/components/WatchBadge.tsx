@@ -4,7 +4,7 @@ import { api } from '../api/client'
 export const WATCH_POLL_MS = 10_000
 
 /**
- * Watch mode's pending count (SPEC §18): files a watched folder couldn't auto-sort. Clicking
+ * Watch mode's pending count: files a watched folder couldn't auto-sort. Clicking
  * opens that folder's watch session in the normal swipe UI. Desktop only (the watch endpoints
  * are loopback-only), hidden while watch mode is off.
  */

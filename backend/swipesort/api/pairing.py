@@ -1,4 +1,4 @@
-"""Phone pairing over LAN + request authentication (SPEC §9, §10, §12).
+"""Phone pairing over LAN + request authentication.
 
 Trust model:
 - Loopback peers (127.0.0.1 / ::1) are the desktop: trusted as before, but their Host header

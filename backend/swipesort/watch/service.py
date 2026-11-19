@@ -1,4 +1,4 @@
-"""Watch mode glue (SPEC §18): watched folders -> settle -> watch session pipeline -> auto-move
+"""Watch mode glue: watched folders -> settle -> watch session pipeline -> auto-move
 or pending queue, plus notifications and the activity digest.
 
 Model: every (watched folder, output tree) pair owns one long-lived *watch session*

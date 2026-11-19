@@ -70,7 +70,7 @@ def create_app(
             code, _exp = pairing_mgr.start()
             pairing.print_pairing_qr(pairing.pair_url(settings, code, net.lan_ip()),
                                      settings.server.pair_code_ttl_s)
-        if settings.watch.enabled:  # `serve --watch` / watch.enabled (SPEC §18)
+        if settings.watch.enabled:  # `serve --watch` / watch.enabled
             watch.start()
         try:
             yield

@@ -78,7 +78,7 @@ export const api = {
   createFolder: (body: FolderCreate) => post<FolderOut>('/api/folders', body),
   browse: (path?: string) =>
     request<BrowseOut>(`/api/fs/browse?path=${encodeURIComponent(path ?? '')}`),
-  // watch mode (SPEC §18): desktop-only endpoints
+  // watch mode: desktop-only endpoints
   getWatch: () => request<WatchConfig>('/api/watch'),
   putWatch: (body: WatchConfigIn) =>
     request<WatchConfig>('/api/watch', {

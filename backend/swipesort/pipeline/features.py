@@ -1,4 +1,4 @@
-"""Dedup features (SPEC §5): perceptual image hashes and text MinHash.
+"""Dedup features: perceptual image hashes and text MinHash.
 
 `compute_features` is a top-level function so it pickles into a ProcessPoolExecutor.
 """

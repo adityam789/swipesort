@@ -115,7 +115,7 @@ def decide(card_id: str, body: DecideIn, request: Request) -> DecideOut:
 
 @router.post("/proposals/{pid}/decide", response_model=DecideOut)
 def decide_proposal(pid: int, body: DecideIn, request: Request) -> DecideOut:
-    """SPEC §12: {action: accept|rename|dismiss|inbox, name?, accepted_nodes?, renames?}.
+    """{action: accept|rename|dismiss|inbox, name?, accepted_nodes?, renames?}.
     The same proposal is also decidable as card "p<pid>" via /api/cards/{id}/decide."""
     try:
         return svc(request).decide_proposal(pid, body)
@@ -141,7 +141,7 @@ def undo_decision(decision_id: int, request: Request) -> UndoOut:
         raise _guard(e) from e
 
 
-# ---------- watch mode (SPEC §18): names filesystem paths -> desktop (loopback) only ----------
+# ---------- watch mode: names filesystem paths -> desktop (loopback) only ----------
 def watch_svc(request: Request) -> WatchService:
     w: WatchService = request.app.state.watch
     return w

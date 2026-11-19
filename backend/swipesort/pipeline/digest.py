@@ -1,4 +1,4 @@
-"""Digest builder (SPEC §3): ~500 tokens of deterministic text describing one file."""
+"""Digest builder: ~500 tokens of deterministic text describing one file."""
 
 from __future__ import annotations
 

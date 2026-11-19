@@ -20,7 +20,7 @@ def serve(dev: bool = typer.Option(False, "--dev", help="auto-reload"),
           lan: bool = typer.Option(False, "--lan",
                                    help="listen on the LAN so a paired phone can connect"),
           watch: bool = typer.Option(False, "--watch",
-                                     help="start watching the configured folders (SPEC §18)"),
+                                     help="start watching the configured folders"),
           host: str | None = None, port: int | None = None) -> None:
     """Run the local daemon (serves the API and the built PWA).
 

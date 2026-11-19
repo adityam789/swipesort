@@ -1,4 +1,4 @@
-"""M0 acceptance (SPEC §14): sort 50 fixture files by hand through the API, then undo all
+"""M0 acceptance: sort 50 fixture files by hand through the API, then undo all
 50 decisions and verify the original input + output trees are restored exactly (checksums)."""
 
 from __future__ import annotations

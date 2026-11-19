@@ -1,4 +1,4 @@
-"""Folder names for proposals (SPEC §6): LLM naming with a deterministic keyword fallback.
+"""Folder names for proposals: LLM naming with a deterministic keyword fallback.
 
 The fallback is c-TF-IDF-like: a term scores high when most members contain it and few other
 files do. Kind hints (photos, screenshots, code, ...) come from the digest's `kind:` line.

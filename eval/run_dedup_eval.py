@@ -1,4 +1,4 @@
-"""Dedup eval on the fixture corpus (SPEC §15, M2 acceptance).
+"""Dedup eval on the fixture corpus.
 
     cd backend && uv run python ../eval/run_dedup_eval.py --n 300 [--hard] [--seed 0]
 

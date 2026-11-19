@@ -1,4 +1,4 @@
-"""Confidence model (SPEC §3): pure functions over numpy. No DB, no IO."""
+"""Confidence model: pure functions over numpy. No DB, no IO."""
 
 from __future__ import annotations
 

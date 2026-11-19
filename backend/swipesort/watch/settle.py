@@ -1,4 +1,4 @@
-"""Settle delay (SPEC §18): a new file is processed only once it stopped changing.
+"""Settle delay: a new file is processed only once it stopped changing.
 
 A tracked path is *settled* when its signature (size + mtime; for a dropped folder: entry
 count + total size + newest mtime) has been unchanged for `settle_seconds` AND it can be

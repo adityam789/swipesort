@@ -1,4 +1,4 @@
-"""Extractor contract (CLAUDE.md: Extractor.supports(mime) / extract(path) -> Extraction)."""
+"""Extractor contract: Extractor.supports(mime) / extract(path) -> Extraction."""
 
 from __future__ import annotations
 

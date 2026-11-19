@@ -1,4 +1,4 @@
-"""Dedup engine (SPEC §5): exact, near image, near text, version-of, recommendations."""
+"""Dedup engine: exact, near image, near text, version-of, recommendations."""
 
 from __future__ import annotations
 

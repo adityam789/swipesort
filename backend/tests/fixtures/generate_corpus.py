@@ -1,4 +1,4 @@
-"""Synthetic messy-folder corpus with ground truth (SPEC §15).
+"""Synthetic messy-folder corpus with ground truth.
 
     uv run python tests/fixtures/generate_corpus.py OUT_DIR --n 300 --seed 0 [--nested] [--hard]
 

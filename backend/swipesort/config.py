@@ -1,4 +1,4 @@
-"""Defaults + user overrides from ~/.swipesort/config.toml (SPEC §16).
+"""Defaults + user overrides from ~/.swipesort/config.toml.
 
 All thresholds, weights and model names live here. Never hard-code them elsewhere.
 """
@@ -41,11 +41,11 @@ class Dedup(BaseModel):
 
 
 class Proposals(BaseModel):
-    """New folders & cold start (SPEC §6). Similarities are cosines on the embedding model's
+    """New folders & cold start. Similarities are cosines on the embedding model's
     scale, so `by_provider` overrides them per provider (like scoring.temperature_by_provider)."""
 
     enabled: bool = True
-    # §6.1 low-confidence routing: one card per group of < tiers.choices files
+    # low-confidence routing: one card per group of < tiers.choices files
     min_cluster: int = 3  # HDBSCAN min_cluster_size; also the minimum live members of a card
     cohesion: float = 0.70  # mean pairwise cosine of the group
     max_sibling_sim: float = 0.55  # group centroid vs every sibling folder (centroid or profile)
@@ -53,10 +53,10 @@ class Proposals(BaseModel):
     group_merge_sim: float = 0.85  # merge over-split groups whose centroids are this close
     singleton_max: int = 3  # at most this many singleton proposals per run
     dismissed_overlap: float = 0.5  # don't re-propose a group sharing this much with a dismissal
-    # §6.2 re-run triggers
+    # re-run triggers
     every_decisions: int = 25
     inbox_trigger: int = 8  # files sent to _Inbox folders since the last run
-    # §6.2 cold start (empty output): leaf clusters -> 5..12 top folders, 2 levels max
+    # cold start (empty output): leaf clusters -> 5..12 top folders, 2 levels max
     cold_min_cluster_frac: float = 0.02  # leaf min_cluster_size = max(min_cluster, frac * n)
     cold_min_samples: int = 0  # HDBSCAN min_samples for the leaf pass (0 = library default)
     top_min: int = 5
@@ -93,7 +93,7 @@ class Proposals(BaseModel):
 
 
 class WatchFolder(BaseModel):
-    """One watched folder and the output tree its files are sorted into (SPEC §18)."""
+    """One watched folder and the output tree its files are sorted into."""
 
     path: str
     output: str = ""  # empty: watch.default_output
@@ -101,7 +101,7 @@ class WatchFolder(BaseModel):
 
 
 class Watch(BaseModel):
-    """Watch mode (SPEC §18). `folders` accepts plain strings (backward compatible: they use
+    """Watch mode. `folders` accepts plain strings (backward compatible: they use
     `default_output`) or {path, output, enabled} tables."""
 
     enabled: bool = False
@@ -112,7 +112,7 @@ class Watch(BaseModel):
     rescan_seconds: float = 30  # periodic top-level rescan for events the OS dropped
     auto_move_threshold: float = 0.97
     auto_move: bool = True
-    # SPEC §18 safety: auto actions stay off until the user made this many decisions (counted
+    # auto actions stay off until the user made this many decisions (counted
     # across all sessions: calibration is global, not per folder)
     min_decisions_for_auto: int = 50
     auto_trash_exact_dupes: bool = False  # exact dupes of an output-tree file -> quarantine
@@ -147,7 +147,7 @@ class Trash(BaseModel):
 
 
 class Scoring(BaseModel):
-    # raw(F) = w · [s_centroid, s_profile, s_knn, s_meta]  (SPEC §3)
+    # raw(F) = w · [s_centroid, s_profile, s_knn, s_meta]
     w_centroid: float = 1.0
     w_profile: float = 0.6
     w_profile_empty: float = 1.5  # profile weight when F has no files (cold start)
@@ -172,12 +172,12 @@ class Scoring(BaseModel):
 
 
 class Descent(BaseModel):
-    path_conf: str = "product"  # product | min  (SPEC §4; "centroid" method only)
-    method: str = "mass"  # mass (flat leaf probability mass) | centroid (SPEC §4 literal)
+    path_conf: str = "product"  # product | min
+    method: str = "mass"  # mass (flat leaf probability mass) | centroid
 
 
 class Batch(BaseModel):
-    min_size: int = 3  # SPEC §1 #4: "14 files -> Finance/Taxes/2025 at >= 95%, confirm all?"
+    min_size: int = 3  # "14 files -> Finance/Taxes/2025 at >= 95%, confirm all?"
     threshold: float = 0.95
     inbox_min_size: int = 3  # low-confidence files at the same stop node -> one inbox card
 
@@ -240,7 +240,7 @@ class Executor(BaseModel):
 class Server(BaseModel):
     host: str = "127.0.0.1"  # localhost-only mode (default): no firewall prompt, no phone
     port: int = 8765
-    # LAN mode (`swipesort serve --lan`, SPEC §10): bind lan_host so a paired phone can connect.
+    # LAN mode (`swipesort serve --lan`): bind lan_host so a paired phone can connect.
     # The first bind to 0.0.0.0 makes Windows Firewall ask for permission.
     lan: bool = False
     lan_host: str = "0.0.0.0"
@@ -249,7 +249,7 @@ class Server(BaseModel):
     # "testserver" is what Starlette's TestClient sends.
     local_hostnames: list[str] = Field(
         default_factory=lambda: ["localhost", "127.0.0.1", "[::1]", "::1", "testserver"])
-    # pairing (SPEC §12 POST /api/pair)
+    # pairing
     pair_code_ttl_s: int = 300
     pair_code_length: int = 8
     pair_max_failures: int = 5  # failed redeems per client IP within the window -> 429

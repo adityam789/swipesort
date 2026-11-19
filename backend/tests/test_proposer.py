@@ -1,4 +1,4 @@
-"""engine/proposer.py and engine/naming.py: pure functions (SPEC §6)."""
+"""engine/proposer.py and engine/naming.py: pure functions."""
 
 from __future__ import annotations
 

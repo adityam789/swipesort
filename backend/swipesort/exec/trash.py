@@ -1,4 +1,4 @@
-"""Path helpers for the quarantine trash (SPEC §8). Pure; all mutations live in executor.py."""
+"""Path helpers for the quarantine trash. Pure; all mutations live in executor.py."""
 
 from __future__ import annotations
 

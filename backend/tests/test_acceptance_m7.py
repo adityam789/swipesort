@@ -1,4 +1,4 @@
-"""M7 acceptance (SPEC §14, §18): drop 20 files into a watched Downloads folder: high-confidence
+"""M7 acceptance: drop 20 files into a watched Downloads folder: high-confidence
 ones are auto-sorted within 10 s of finishing download; the rest appear as cards; every
 auto-move is undoable.
 
@@ -9,7 +9,7 @@ on Windows, which `platform.is_locked` detects), a dropped code-project bundle, 
 duplicates of output-tree files, unplaceable files, and abandoned partial downloads.
 
 Thresholds: the production default stays auto_move_threshold = 0.97 and
-min_decisions_for_auto = 50 (SPEC §18). Here min_decisions_for_auto = 0 (fresh database) and
+min_decisions_for_auto = 50. Here min_decisions_for_auto = 0 (fresh database) and
 the threshold is 0.95: the fake hashing embeddings put clean corpus files in the Confirm tier at
 ~0.95-1.0 (see the M1 eval), so 0.95 makes "high confidence" mean the same thing as 0.97 does
 for a calibrated real model.
@@ -433,7 +433,7 @@ def test_put_watch_validates_folders(env: dict[str, Any], tmp_path: Path) -> Non
 
 
 def test_auto_move_locked_until_enough_decisions(env: dict[str, Any]) -> None:
-    """SPEC §18 safety: auto-move stays off until the user made min_decisions_for_auto
+    """auto-move stays off until the user made min_decisions_for_auto
     decisions (counted across all sessions, per file; automatic, undone and non-placement
     decisions don't count)."""
     client: TestClient = env["client"]

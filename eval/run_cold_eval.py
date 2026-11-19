@@ -1,4 +1,4 @@
-"""M5 eval (SPEC §6.2, §14): cold start on an empty output tree -> one "Proposed structure".
+"""M5 eval: cold start on an empty output tree -> one "Proposed structure".
 
     cd backend && uv run python ../eval/run_cold_eval.py --n 300 --provider fake
     cd backend && uv run python ../eval/run_cold_eval.py --n 300 --provider local --llm ollama

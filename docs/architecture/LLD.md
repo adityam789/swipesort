@@ -43,7 +43,7 @@ Every number below is a default from `config.py`; none is hard-coded.
   An empty folder gets neutral evidence: profile similarity stands in for the centroid, and it gets the average extension prior. This lets a new folder win.
 - **Null option.** A "none of these" option is added before the softmax. Its score is the 0.25-quantile of how existing output files score against the wrong folders. Without it the softmax is purely relative, so a file that fits nothing would still get Confirm.
 - **Temperature.** Set per embedding provider, because each model has a different similarity scale (bge-small 0.045).
-- **Descent, `method = mass`.** Step into a child folder while its subtree holds at least 0.75 of the leaf probability mass. Otherwise stop at `<node>/_Inbox`. It beat the SPEC's centroid-step method on the nested corpus; that method is still selectable.
+- **Descent, `method = mass`.** Step into a child folder while its subtree holds at least 0.75 of the leaf probability mass. Otherwise stop at `<node>/_Inbox`. It beat the original centroid-step method on the nested corpus; that method is still selectable.
 - **Tiers.**
 
   | Tier | Condition |

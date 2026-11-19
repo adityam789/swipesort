@@ -1,4 +1,4 @@
-"""LAN helpers for phone pairing (SPEC §9, §10). Stdlib only, OS-independent."""
+"""LAN helpers for phone pairing. Stdlib only, OS-independent."""
 
 from __future__ import annotations
 

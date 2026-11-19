@@ -1,5 +1,5 @@
-"""M5 acceptance (SPEC §14): empty output + 300 mixed files -> a sensible proposed structure
-that rediscovers the seeded hidden categories; low-confidence routing (§6.1) groups files of a
+"""M5 acceptance: empty output + 300 mixed files -> a sensible proposed structure
+that rediscovers the seeded hidden categories; low-confidence routing groups files of a
 missing category into one new-folder card. Offline (fake embeddings, fallback names)."""
 
 from __future__ import annotations
@@ -167,7 +167,7 @@ def test_low_confidence_files_of_a_missing_category_become_a_folder(tmp_path: Pa
         assert sum(o.type == OpType.mkdir for o in ops) >= 1
         assert sum(o.type == OpType.move for o in ops) == len(members)
 
-    # §6.1 step 5: re-scored, the remaining resumes now land in the new folder, more confident
+    # re-scored, the remaining resumes now land in the new folder, more confident
     deadline = time.monotonic() + 30
     improved: dict[int, tuple[float, str]] = {}
     while time.monotonic() < deadline:

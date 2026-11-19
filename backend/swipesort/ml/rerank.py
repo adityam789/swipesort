@@ -1,4 +1,4 @@
-"""LLM rerank of the top-k folder candidates (SPEC §3). Pure helpers + one IO function."""
+"""LLM rerank of the top-k folder candidates. Pure helpers + one IO function."""
 
 from __future__ import annotations
 

@@ -1,4 +1,4 @@
-"""Model gateway (SPEC §9). All model names come from config. Providers: ollama | fake."""
+"""Model gateway. All model names come from config. Providers: ollama | fake."""
 
 from __future__ import annotations
 

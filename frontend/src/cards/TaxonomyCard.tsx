@@ -38,7 +38,7 @@ function Row({
   )
 }
 
-/** Cold start (SPEC §6.2): one "Proposed structure" card; accept all, a subset, or edit names. */
+/** Cold start: one "Proposed structure" card; accept all, a subset, or edit names. */
 export function TaxonomyCard({ card }: { card: Card }) {
   const tax = card.taxonomy
   const draft = useSession((s) => s.drafts[card.id])

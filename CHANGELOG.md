@@ -4,9 +4,18 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Added
+- `Makefile` (macOS / Linux) and `scripts/swipesort.ps1` (Windows): one-command setup, run, phone, watch, agent and LLM tasks.
+- [User guide](docs/user-guide.md) and [roadmap](docs/ROADMAP.md).
+
+### Removed
+- Internal planning files (the build spec and agent instructions) from the repository.
+
 ## [1.0.0] — 2026-11-19
 
-First public release. It covers milestones M0–M7 of [SPEC.md](SPEC.md).
+First public release. It covers milestones M0–M7 (see [docs/ROADMAP.md](docs/ROADMAP.md)).
 
 ### Added
 - **M0 Skeleton:**
@@ -51,6 +60,7 @@ First public release. It covers milestones M0–M7 of [SPEC.md](SPEC.md).
 
 ### Changed
 - Creating a folder now re-clusters the files that still don't fit right after the re-score, without waiting for the next periodic proposer run.
-- M8 (learning) and the later items moved to [Future enhancements](SPEC.md#19-future-enhancements).
+- M8 (learning) and the later items moved to [future enhancements](docs/ROADMAP.md#future-enhancements).
 
+[Unreleased]: https://github.com/adityam789/swipesort/compare/v1.0.0...HEAD
 [1.0.0]: https://github.com/adityam789/swipesort/releases/tag/v1.0.0

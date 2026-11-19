@@ -1,9 +1,9 @@
-"""OS file events for watched folders (SPEC §18) via watchdog: FSEvents on macOS,
+"""OS file events for watched folders via watchdog: FSEvents on macOS,
 ReadDirectoryChangesW on Windows (inotify / polling elsewhere).
 
 Every event is mapped to a *unit*: the top-level entry of the watched folder it belongs to. A
 file is its own unit; anything inside a dropped folder maps to that folder, so a `.git` checkout
-or an `.app` bundle settles and moves as one item (CLAUDE.md: never scatter bundles), and a
+or an `.app` bundle settles and moves as one item (bundles are never scattered), and a
 plain folder is scanned as a whole once it stopped changing.
 """
 

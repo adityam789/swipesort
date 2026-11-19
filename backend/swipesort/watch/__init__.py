@@ -1,1 +1,1 @@
-"""Watch mode (SPEC §18): watched folders, settle delay, auto-move, pending queue."""
+"""Watch mode: watched folders, settle delay, auto-move, pending queue."""

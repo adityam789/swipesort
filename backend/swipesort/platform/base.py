@@ -1,4 +1,4 @@
-"""Platform protocol (SPEC §10). Only swipesort/platform/* may inspect sys.platform."""
+"""Platform protocol. Only swipesort/platform/* may inspect sys.platform."""
 
 from __future__ import annotations
 

@@ -3,7 +3,7 @@ import react from '@vitejs/plugin-react'
 import { VitePWA } from 'vite-plugin-pwa'
 import { defineConfig } from 'vitest/config'
 
-// PWA (SPEC §10): the service worker precaches the app shell only. /api (cards, previews,
+// PWA: the service worker precaches the app shell only. /api (cards, previews,
 // the WebSocket) always goes to the network: it is live session state on the daemon.
 const pwa = VitePWA({
   registerType: 'autoUpdate',

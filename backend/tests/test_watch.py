@@ -1,4 +1,4 @@
-"""Watch mode units (SPEC §18): settle logic (fake clock), ignore patterns, safety gating,
+"""Watch mode units: settle logic (fake clock), ignore patterns, safety gating,
 event -> unit mapping, background-agent definitions, notification commands, targeted undo."""
 
 from __future__ import annotations

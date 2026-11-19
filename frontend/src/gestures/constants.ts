@@ -27,5 +27,5 @@ export const SHEET = {
   spring: { type: 'spring', stiffness: 420, damping: 38 } as const,
 }
 
-/** Phone layout: full-screen card, drawers become bottom sheets (SPEC §2.1). */
+/** Phone layout: full-screen card, drawers become bottom sheets. */
 export const MOBILE_QUERY = '(max-width: 767px)'

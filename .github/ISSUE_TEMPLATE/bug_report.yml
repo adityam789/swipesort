@@ -1,5 +1,5 @@
 name: Bug report
-description: Something doesn't work as described in SPEC.md
+description: Something doesn't work as documented
 labels: [bug]
 body:
   - type: textarea

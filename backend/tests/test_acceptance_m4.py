@@ -1,4 +1,4 @@
-"""M4 acceptance (SPEC §14): nested tree (depth 4) -> correct-path rate >= 75% and the rest in
+"""M4 acceptance: nested tree (depth 4) -> correct-path rate >= 75% and the rest in
 the correct ancestor's inbox; batch cards; LLM rerank semantics (offline, scripted LLM)."""
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ def test_llm_disagreement_caps_confirm(tmp_path: Path) -> None:
     cards = client.get(f"/api/sessions/{sid}/cards").json()
     assert llm.calls >= 1
     for c in cards:
-        assert c["kind"] != "confirm"  # capped below 0.9 on disagreement (SPEC §3)
+        assert c["kind"] != "confirm"  # capped below 0.9 on disagreement
         assert c["confidence"] < 0.9
         assert c["candidates"][0]["path"] == "School/Lectures"  # LLM's pick leads Choices
         assert c["reason"] == "Scripted reason from the file"

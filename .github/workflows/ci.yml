@@ -37,3 +37,24 @@ jobs:
       - run: npm ci
       - run: npm run build
       - run: npx vitest run
+  setup-scripts:
+    # the one-command setup users run: Makefile on macOS, PowerShell on Windows
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: uv python install 3.12
+      - if: runner.os != 'Windows'
+        run: make setup && make help
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          ./scripts/swipesort.ps1 setup
+          ./scripts/swipesort.ps1 help

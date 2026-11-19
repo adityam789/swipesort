@@ -1,4 +1,4 @@
-"""Duplicate & redundancy detection (SPEC §5). Pure functions over precomputed features.
+"""Duplicate & redundancy detection. Pure functions over precomputed features.
 
 CONTRACT (implemented by the dedup agent; used by pipeline/worker.py):
 

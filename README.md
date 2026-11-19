@@ -30,27 +30,18 @@
 
 ## Quick start
 
-Prerequisites: Python 3.12 with [uv](https://docs.astral.sh/uv/), and Node 20+. [Ollama](https://ollama.com) is optional and adds LLM reranking and folder naming.
+Requires [uv](https://docs.astral.sh/uv/) and Node 20+. [Ollama](https://ollama.com) is optional and adds the LLM features.
 
 ```bash
 git clone https://github.com/adityam789/swipesort.git && cd swipesort
-(cd frontend && npm ci && npm run build)        # the daemon serves the built UI
-cd backend && uv sync
-uv run swipesort serve                          # → http://127.0.0.1:8765
+make setup && make run            # macOS / Linux  → http://127.0.0.1:8765
+```
+```powershell
+.\scripts\swipesort.ps1 setup; .\scripts\swipesort.ps1 run   # Windows
 ```
 
-Open the URL, then choose an input folder and an output folder. The embedding model (`BAAI/bge-small-en-v1.5`, about 130 MB) downloads on first use. For LLM features:
-
-```bash
-ollama pull qwen2.5:7b-instruct                 # or qwen2.5:3b-instruct on smaller machines
-```
-
-| Command | What it does |
-|---|---|
-| `swipesort serve [--lan] [--watch] [--port N]` | Starts the daemon. `--lan` allows paired phones; `--watch` starts the folder watchers. |
-| `swipesort pair` | Prints a pairing QR code for a running daemon. |
-| `swipesort agent install \| uninstall \| status` | Starts the daemon at login (launchd on macOS, Task Scheduler on Windows). |
-| `swipesort purge <session> [--older-than-days N]` | Permanently deletes quarantined trash. This is the only hard delete. |
+`make help` lists every task: `lan` (phone), `watch`, `agent` (start at login), `llm`, `test`, and more.
+The **[user guide](docs/user-guide.md)** covers installation per OS, controls, phone pairing, watch mode, setups for different machines, all settings, and troubleshooting.
 
 ## How it works
 
@@ -63,40 +54,30 @@ Every stage is cached by content hash. Creating a folder or placing a file trigg
 
 - [High-level design](docs/architecture/HLD.md): components, file lifecycle, threads.
 - [Low-level design](docs/architecture/LLD.md): lookahead scheduler, scoring, descent, proposals, cold start, executor, watch mode, pairing.
-- [SPEC.md](SPEC.md): the product and technical specification.
+- [Roadmap](docs/ROADMAP.md): milestones, acceptance checks, future work.
 
 ## Configuration
 
-Defaults live in `backend/swipesort/config.py`. Override them in `~/.swipesort/config.toml`:
-
-```toml
-[tiers]     confirm = 0.90  choices = 0.60  descend = 0.75
-[models]    provider = "local"  llm = "qwen2.5:7b-instruct"
-[llm]       provider = "ollama"            # ollama | llamacpp | none
-[watch]     folders = ["~/Downloads"]  auto_move_threshold = 0.97
-[server]    port = 8765
-```
-
-All data lives in `~/.swipesort/` (or `$SWIPESORT_HOME`): the SQLite state and caches, logs, and the model cache.
+Optional. Put overrides in `~/.swipesort/config.toml`. See [user guide §7](docs/user-guide.md#7-configuration) for common settings, and [`config.py`](backend/swipesort/config.py) for every setting.
 
 ## Development
 
 ```bash
-cd backend  && uv run pytest && uv run mypy swipesort && uv run ruff check .
-cd frontend && npm test -- --run && npx tsc -b && npx oxlint
-cd backend  && uv run swipesort serve --dev     # API with reload; run `npm run dev` in frontend/
+make test        # backend + frontend tests (no models needed)
+make lint        # mypy, ruff, tsc, oxlint
+make dev         # API with auto-reload; run `npm run dev` in frontend/ for the UI
 ```
 
-- Tests run without any model, using a deterministic fake embedding provider.
-- `backend/tests/fixtures/generate_corpus.py` builds a synthetic corpus with ground truth (invoices, receipts, resumes, lectures, photos, code, seeded duplicates and misleading names) that every milestone is measured against.
+- Tests use a deterministic fake embedding provider, so no models are needed.
+- `backend/tests/fixtures/generate_corpus.py` builds a synthetic corpus with ground truth that every milestone is measured against.
 - Evaluation scripts are in `eval/`.
-- CI runs the full matrix on **macOS and Windows**.
+- CI runs everything on **macOS and Windows**.
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## Status
 
-Version 1.0 completes milestones M0–M7 of the [spec](SPEC.md#14-milestones-build-in-this-order-each-must-pass-its-acceptance-check):
+Version 1.0 completes milestones M0–M7. Each acceptance check runs in CI on macOS and Windows; details are in the [roadmap](docs/ROADMAP.md).
 
 | | Milestone | Acceptance result |
 |---|---|---|
@@ -109,7 +90,7 @@ Version 1.0 completes milestones M0–M7 of the [spec](SPEC.md#14-milestones-bui
 | M6 | Mobile | full session completed from a phone over LAN |
 | M7 | Watch mode | 16 of 20 files auto-sorted in < 1 s after the download finished; all undoable |
 
-Future work is listed under [Future enhancements](SPEC.md#19-future-enhancements). It includes M8 learning and calibration, dry-run export, Linux, and a native app.
+Future work is listed under [future enhancements](docs/ROADMAP.md#future-enhancements). It includes M8 learning and calibration, dry-run export, Linux, and a native app.
 
 ## Security
 

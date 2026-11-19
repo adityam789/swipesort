@@ -7,7 +7,7 @@ import { ConfidenceMeter, KindChip, Reason } from './Insights'
 const THUMBS = 6
 
 /**
- * Folder proposal (SPEC §6.1): "Create Work/PayPal/Onboarding/ for these 5 files?".
+ * Folder proposal: "Create Work/PayPal/Onboarding/ for these 5 files?".
  * The name is the only text input in the app; the edit is sent along when the card is accepted.
  */
 export function ProposalCard({ card }: { card: Card }) {

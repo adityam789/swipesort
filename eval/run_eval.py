@@ -1,4 +1,4 @@
-"""Eval on the fixture corpus (SPEC §15): accuracy@1/3, tier distribution, calibration, latency.
+"""Eval on the fixture corpus: accuracy@1/3, tier distribution, calibration, latency.
 
     cd backend && uv run python ../eval/run_eval.py --n 300 --provider fake
     cd backend && uv run python ../eval/run_eval.py --n 300 --provider ollama
@@ -40,14 +40,14 @@ class EvalReport(BaseModel):
     tier_accuracy: dict[str, float]  # top-1 accuracy within each tier (calibration proxy)
     calibration: list[tuple[float, float, int]]  # (bin center, accuracy, count)
     pipeline_s: float
-    # The UI advances optimistically from its prefetched queue (SPEC §2.2): the decide POST runs
+    # The UI advances optimistically from its prefetched queue: the decide POST runs
     # in the background, and the only request it can wait on is the next-cards refill.
     next_cards_ms_p50: float
     next_cards_ms_p95: float
     decide_ms_p50: float  # background file op + journal; reported, not gated
     decide_ms_p95: float
     misses: list[str]
-    # M4 (SPEC §4): where the file would actually go (descent destination)
+    # M4: where the file would actually go (descent destination)
     path_correct: float = 0.0  # reached the right leaf
     ancestor_inbox: float = 0.0  # stopped mid-tree at an ancestor of the right folder
     dest_wrong: float = 0.0  # wrong leaf, or an inbox outside the right branch

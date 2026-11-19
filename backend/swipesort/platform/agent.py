@@ -1,4 +1,4 @@
-"""Background agent definitions (SPEC §18): pure builders, unit-tested without installing anything.
+"""Background agent definitions: pure builders, unit-tested without installing anything.
 
 macOS: a per-user LaunchAgent (~/Library/LaunchAgents/com.swipesort.daemon.plist) loaded with
 `launchctl bootstrap gui/<uid>`. Windows: a Task Scheduler task that runs at logon.

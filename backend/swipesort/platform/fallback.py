@@ -1,4 +1,4 @@
-"""Fallback platform: pure-Python behaviour that works everywhere (SPEC §10)."""
+"""Fallback platform: pure-Python behaviour that works everywhere."""
 
 from __future__ import annotations
 

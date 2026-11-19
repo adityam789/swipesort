@@ -1,4 +1,4 @@
-"""Confidence-gated descent (SPEC §4). Pure functions over the folder index.
+"""Confidence-gated descent. Pure functions over the folder index.
 
 CONTRACT (implemented by the descent agent):
 
@@ -18,7 +18,7 @@ def descend(file_vec, file_name_tokens: list[str], file_ext: str,
     # loop: children of node (excluding `excluded`, e.g. _Inbox folders); none -> stop (leaf);
     # score children with scoring.score() (softmax over siblings, using SUBTREE aggregates —
     # FolderIndex already holds subtree centroid/ext/name tokens); if best p >= tiers.descend:
-    # step into it; else stop at node. Leaf-only rule (SPEC §4): if node has_direct_files and
+    # step into it; else stop at node. Leaf-only rule: if node has_direct_files and
     # node is not root, stopping there is a real destination (reached_leaf=True).
 """
 
@@ -147,7 +147,7 @@ def descend_mass(
     A folder's confidence is the probability mass of all candidate leaves in its subtree
     (`flat` comes from scoring.score over leaf candidates, incl. the "none of these" option, so
     masses sum to <= 1). Step into the child holding >= tiers.descend of the mass; stop where it
-    splits. Same semantics as SPEC §4 (descend while confident, else <node>/_Inbox) but the
+    splits. Same semantics as the centroid method (descend while confident, else <node>/_Inbox) but the
     destination never contradicts the flat ranking, and coarse subtree centroids aren't needed.
     """
     p_leaf = {s.folder_id: s.p for s in flat}

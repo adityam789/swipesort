@@ -2,7 +2,7 @@
 
 Diagram sources are in `diagrams/*.puml` and the rendered images in `diagrams/*.svg|png`.
 Re-render with `plantuml -tsvg -tpng docs/architecture/diagrams/*.puml`.
-SPEC.md stays the source of truth for behavior. This file describes how the code implements it.
+For using the app see the [user guide](../user-guide.md); for milestones see the [roadmap](../ROADMAP.md).
 
 ## 1. System context
 
@@ -67,4 +67,4 @@ Threads talk through events and the DB. Changes reach the UI through `EventBus` 
 | M5 | Proposals, cold start | [LLD §3](LLD.md#3-new-folder--re-rank-and-re-cluster), [LLD §4](LLD.md#4-cold-start) |
 | M6 | PWA, pairing | [LLD §8](LLD.md#8-pairing--lan-auth) |
 | M7 | Watch mode | [LLD §7](LLD.md#7-watch-mode) |
-| M8+ | Future enhancements | [SPEC §19](../../SPEC.md#19-future-enhancements), [LLD §9](LLD.md#9-m8-learning-future-enhancement) |
+| M8+ | Future enhancements | [Roadmap](../ROADMAP.md#future-enhancements), [LLD §9](LLD.md#9-m8-learning-future-enhancement) |

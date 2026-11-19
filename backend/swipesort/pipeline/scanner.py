@@ -1,4 +1,4 @@
-"""Recursive scan (SPEC §7). Bundles are single items; symlinks are never followed."""
+"""Recursive scan. Bundles are single items; symlinks are never followed."""
 
 from __future__ import annotations
 

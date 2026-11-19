@@ -1,9 +1,9 @@
-"""M6 acceptance (SPEC §14): a full session completed from a phone over LAN.
+"""M6 acceptance: a full session completed from a phone over LAN.
 
 The phone is simulated by a TestClient whose peer address is a LAN IP. The session is created
 from loopback (desktop); the phone pairs with a QR code, then fetches cards, decides them all,
 undoes, loads previews (cookie auth) and streams events. The real-phone run is the manual
-checklist in docs/manual-m6-check.md.
+checklist in docs/user-guide.md §4.
 """
 
 from __future__ import annotations

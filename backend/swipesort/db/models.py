@@ -1,4 +1,4 @@
-"""SQLite data model (SPEC §11). M0 subset; later milestones add columns/tables."""
+"""SQLite data model. M0 subset; later milestones add columns/tables."""
 
 from __future__ import annotations
 
@@ -44,7 +44,7 @@ class Session(SQLModel, table=True):
     status: str = "active"
     config_json: str = "{}"
     # "manual" (a one-off sorting session) | "watch" (long-lived: one per watched folder +
-    # output pair, reused across daemon restarts; new files are added incrementally, SPEC §18)
+    # output pair, reused across daemon restarts; new files are added incrementally)
     kind: str = Field(default="manual", index=True)
 
 
@@ -87,7 +87,7 @@ class Decision(SQLModel, table=True):
     latency_ms: int = 0
     undone: bool = False
     payload_json: str = ""  # batch decisions: {"members": [...], "tiers": {...}} for undo
-    source: str = Field(default="user", index=True)  # user | auto (watch mode, SPEC §18)
+    source: str = Field(default="user", index=True)  # user | auto (watch mode)
 
 
 class Op(SQLModel, table=True):
@@ -103,7 +103,7 @@ class Op(SQLModel, table=True):
 
 
 class Extraction(SQLModel, table=True):
-    """Stage output cached by content hash (SPEC §7 caching)."""
+    """Stage output cached by content hash."""
 
     content_hash: str = Field(primary_key=True)
     mime: str = ""
@@ -159,7 +159,7 @@ class Suggestion(SQLModel, table=True):
 
 
 class Features(SQLModel, table=True):
-    """Dedup features cached by content hash (SPEC §5)."""
+    """Dedup features cached by content hash."""
 
     content_hash: str = Field(primary_key=True)
     quick_hash: str = ""
@@ -172,7 +172,7 @@ class Features(SQLModel, table=True):
 
 
 class Proposal(SQLModel, table=True):
-    """A new-folder proposal (SPEC §6, §11).
+    """A new-folder proposal.
 
     kind: folder (one new folder under `parent_folder_id`, the descent stop node) |
           taxonomy (cold start: a 2-level structure under the output root, see taxonomy_json).
@@ -192,12 +192,12 @@ class Proposal(SQLModel, table=True):
     # {"nodes": [{"id", "name", "members": [...], "children": [...]}], "inbox": [...]}
     taxonomy_json: str = ""
     named_by: str = "fallback"  # fallback | llm | user
-    singleton: bool = False  # §6.1 "clearly a new topic" single file (lower priority)
+    singleton: bool = False  # "clearly a new topic" single file (lower priority)
     created_at: datetime = Field(default_factory=now)
 
 
 class Device(SQLModel, table=True):
-    """A phone paired over LAN (SPEC §9, §12 POST /api/pair). Only a SHA-256 of the bearer
+    """A phone paired over LAN. Only a SHA-256 of the bearer
     token is stored; deleting the row revokes the device."""
 
     id: int | None = Field(default=None, primary_key=True)

@@ -1,4 +1,4 @@
-"""Cross-OS filename sanitizing and collision handling (pure functions, SPEC §10).
+"""Cross-OS filename sanitizing and collision handling (pure functions).
 
 Windows rules are applied on every OS so that a tree created on a Mac still works on Windows.
 """

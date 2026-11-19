@@ -45,11 +45,11 @@ export interface SessionOut {
   /** Pipeline running in this daemon run (false: left over from an earlier run). */
   live?: boolean
   created_at?: string | null
-  /** manual | watch (a watched folder's pending queue, SPEC §18). */
+  /** manual | watch (a watched folder's pending queue). */
   kind?: string
 }
 
-// Phone pairing (SPEC §12 POST /api/pair; backend api/pairing.py)
+// Phone pairing
 export interface PairStatus {
   /** Request came from the computer running the daemon (desktop). */
   local: boolean
@@ -162,7 +162,7 @@ export interface BatchInfo {
 
 export type NamedBy = 'fallback' | 'llm' | 'user'
 
-/** Folder proposal (SPEC §6.1): create `path` and move `members` into it. */
+/** Folder proposal: create `path` and move `members` into it. */
 export interface ProposalInfo {
   proposal_id: number
   name: string
@@ -184,7 +184,7 @@ export interface TaxonomyNode {
   children: TaxonomyNode[]
 }
 
-/** Cold start "Proposed structure" (SPEC §6.2). */
+/** Cold start "Proposed structure". */
 export interface TaxonomyInfo {
   proposal_id: number
   nodes: TaxonomyNode[]
@@ -280,7 +280,7 @@ export interface StreamEvent {
 
 export const DIRECTIONS: Direction[] = ['up', 'right', 'down', 'left']
 
-// Watch mode (SPEC §18; backend api/schemas.py "watch mode")
+// Watch mode
 export interface WatchFolderIn {
   path: string
   output: string

@@ -11,7 +11,7 @@ from sqlmodel import Session, select
 from swipesort.db.models import Embedding
 from swipesort.ml.gateway import Provider
 
-# SPEC §7: single-flight model queue. All provider calls go through this lock.
+# single-flight model queue. All provider calls go through this lock.
 _model_lock = threading.Lock()
 
 

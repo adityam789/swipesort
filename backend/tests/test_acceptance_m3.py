@@ -1,4 +1,4 @@
-"""M3 acceptance (SPEC §14): ≥ 15 READY cards maintained while swiping on 1k files; creating a
+"""M3 acceptance: ≥ 15 READY cards maintained while swiping on 1k files; creating a
 folder updates pending cards (pushed over the WebSocket)."""
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
-"""M1 acceptance (SPEC §14): top-1 ≥ 80%, top-3 ≥ 95%, card → next card < 100 ms.
+"""M1 acceptance: top-1 ≥ 80%, top-3 ≥ 95%, card → next card < 100 ms.
 
-Runs offline with the fake provider (CLAUDE.md); `eval/run_eval.py --provider ollama` is the
+Runs offline with the fake provider; `eval/run_eval.py --provider ollama` is the
 real-model run.
 """
 
@@ -75,7 +75,7 @@ def test_inbox_then_undo_removes_inbox(tmp_path: Path) -> None:
     assert card["kind"] == "inbox"
     r = client.post(f"/api/cards/{card['id']}/decide", json={"action": "inbox"})
     assert r.status_code == 200, r.text
-    # SPEC §4: the inbox lives at the level where descent stopped (card.destination)
+    # the inbox lives at the level where descent stopped (card.destination)
     inbox = tmp_path / "out" / card["destination"]
     assert inbox.name == "_Inbox" and (inbox / card["file"]["name"]).exists()
     client.post(f"/api/sessions/{sid}/undo", json={"steps": 1})

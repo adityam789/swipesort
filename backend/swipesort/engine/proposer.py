@@ -1,9 +1,9 @@
-"""New folders & cold start (SPEC §6): pure functions over numpy arrays. No DB, no IO.
+"""New folders & cold start: pure functions over numpy arrays. No DB, no IO.
 
 - `cluster`: HDBSCAN on L2-normalized vectors (euclidean on unit vectors is monotone in cosine).
-- `group_low_confidence` (§6.1): cluster the low-confidence pool per descent stop node.
-- `decide_group` (§6.1 step 3): new folder vs `_Inbox` for one group.
-- `cold_start_taxonomy` (§6.2): leaf clusters of the whole input, grouped into 5..12 top folders.
+- `group_low_confidence`: cluster the low-confidence pool per descent stop node.
+- `decide_group`: new folder vs `_Inbox` for one group.
+- `cold_start_taxonomy`: leaf clusters of the whole input, grouped into 5..12 top folders.
 """
 
 from __future__ import annotations
@@ -78,7 +78,7 @@ def cluster(vecs: npt.ArrayLike, min_cluster_size: int, min_samples: int = 0,
     return labels
 
 
-# --------------------------------------------------------------------------- §6.1 routing
+# --------------------------------------------------------------------------- low-confidence routing
 
 
 class LowConf(BaseModel):
@@ -132,7 +132,7 @@ def merge_groups(x: Mat, parts: list[list[int]], min_centroid_sim: float,
                  min_cohesion: float) -> list[list[int]]:
     """Greedy agglomeration of HDBSCAN's (often over-split) groups: repeatedly merge the most
     similar pair while their centroids are >= min_centroid_sim apart and the union stays
-    cohesive. Brute force: pools are small (SPEC scale: 100-1,000 files)."""
+    cohesive. Brute force: pools are small."""
     parts = [list(p) for p in parts if p]
     while len(parts) > 1:
         cents = np.stack([centroid(x[p]) for p in parts])
@@ -161,7 +161,7 @@ Verdict = Literal["new_folder", "inbox"]
 
 def decide_group(n: int, group_cohesion: float, max_sibling: float, has_name: bool,
                  cfg: Proposals) -> Verdict:
-    """SPEC §6.1 step 3: new folder only when big enough, cohesive, distinct from every sibling
+    """New folder only when big enough, cohesive, distinct from every sibling
     and specifically nameable; otherwise the stop node's `_Inbox`."""
     if (n >= cfg.min_cluster and group_cohesion >= cfg.cohesion
             and max_sibling < cfg.max_sibling_sim and has_name):
@@ -181,7 +181,7 @@ def overlaps(a: Sequence[int], b: Sequence[int], share: float) -> bool:
     return len(sa & sb) / min(len(sa), len(sb)) >= share
 
 
-# --------------------------------------------------------------------------- §6.2 cold start
+# --------------------------------------------------------------------------- cold start
 
 
 class Taxonomy(BaseModel):
