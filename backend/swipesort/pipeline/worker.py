@@ -120,6 +120,8 @@ class SessionPipeline:
         self._propose_lock = threading.Lock()
         self._propose_wanted = threading.Event()
         self._rerun_due = False
+        self._recluster_after_rescore = False  # a folder appeared: re-cluster after rescoring
+        self.proposer_runs = 0  # completed proposer passes (observability / tests)
         self.proposals_idle = threading.Event()  # set when no proposer work is in flight
         self.proposals_idle.set()
         self._decisions_since = 0
@@ -827,6 +829,13 @@ class SessionPipeline:
         self._emit("updated", changed)
         if changed and self.settings.proposals.enabled:
             self._withdraw_resolved()
+        with self._lock:
+            recluster, self._recluster_after_rescore = self._recluster_after_rescore, False
+        if recluster and self.settings.proposals.enabled:
+            # SPEC §6.1 step 5: a new folder changes what "doesn't fit" means. Files that are
+            # still low-confidence after the rescore are re-clustered now, not at the next
+            # every_decisions / inbox_trigger tick.
+            self.request_proposals()
         return changed
 
     def _withdraw_resolved(self) -> None:
@@ -924,6 +933,7 @@ class SessionPipeline:
                                                       parent_id=folder.parent_id))
             self._rebuild_index()
             self.tree_version += 1
+            self._recluster_after_rescore = True
         self.request_rescore()
 
     def centroid_of(self, file_ids: list[int]) -> Vec | None:
@@ -983,6 +993,7 @@ class SessionPipeline:
     def propose(self) -> list[int]:
         """One proposer pass. Returns the ids of new proposals (and emits them)."""
         with self._propose_lock:
+            self.proposer_runs += 1
             with DB(self.engine) as db:
                 has_tax = db.exec(select(Proposal.id).where(
                     Proposal.session_id == self.sid, Proposal.kind == "taxonomy")).first()

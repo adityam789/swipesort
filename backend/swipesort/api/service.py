@@ -1364,6 +1364,14 @@ class SessionService:
                     for ix in db.exec(select(IndexedFile).where(
                             IndexedFile.folder_id == fo.id)).all():
                         db.delete(ix)
+                    # proposals made under this folder (the re-cluster after it was created)
+                    # lose their parent: pending ones are withdrawn, history keeps no FK
+                    for pr in db.exec(select(Proposal).where(
+                            Proposal.parent_folder_id == fo.id)).all():
+                        if pr.status == "pending":
+                            pr.status = "withdrawn"
+                        pr.parent_folder_id = None
+                        db.add(pr)
                     db.flush()
                     db.delete(fo)
                     db.flush()  # children before parents (self-referencing FK)

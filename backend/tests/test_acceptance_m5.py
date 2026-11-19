@@ -146,8 +146,16 @@ def test_low_confidence_files_of_a_missing_category_become_a_folder(tmp_path: Pa
                   for i, sg in others.items()}
     assert before, "expected other resumes left to rescore"
 
+    pipe = app.state.service.pipelines[sid]
+    runs_before = pipe.proposer_runs
     r = client.post(f"/api/proposals/{p['proposal_id']}/decide", json={"action": "accept"})
     assert r.status_code == 200, r.text
+    # the new folder triggers a re-cluster right after the rescore (not at the next
+    # every_decisions / inbox_trigger tick)
+    deadline = time.monotonic() + 30
+    while pipe.proposer_runs == runs_before and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert pipe.proposer_runs > runs_before
     dest = out / p["path"]
     assert dest.is_dir()
     names = {mm["name"] for mm in p["members"]}
