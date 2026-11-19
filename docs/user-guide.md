@@ -10,29 +10,39 @@ You need **uv** (Python manager), **Node 20+**, and optionally **Ollama** for th
 | Node | `brew install node` | `winget install OpenJS.NodeJS.LTS` |
 | Ollama (optional) | `brew install ollama` | `winget install Ollama.Ollama` |
 
-Then:
+Then, once:
 
 ```bash
 git clone https://github.com/adityam789/swipesort.git && cd swipesort
-make setup                 # macOS
-make llm                   # optional: download the LLM (~4.7 GB)
+make setup        # Windows: .\scripts\swipesort.ps1 setup
 ```
 
-```powershell
-git clone https://github.com/adityam789/swipesort.git; cd swipesort
-.\scripts\swipesort.ps1 setup          # Windows
-.\scripts\swipesort.ps1 llm            # optional
+`setup` does everything the app needs:
+1. Checks for uv and Node 20+ (`doctor`).
+2. Installs the backend.
+3. Installs the UI and builds it. The backend serves the built UI.
+
+If PowerShell blocks the script, run `powershell -ExecutionPolicy Bypass -File scripts\swipesort.ps1 setup`.
+
+**Optional: the LLM.** `setup` doesn't download it, because it's large and the app works without it. Suggestions, duplicates, batches and folder proposals all run on the small built-in embedding model. The LLM adds one-line reasons, a second opinion on each suggestion, and better folder names. It needs Ollama.
+
+```bash
+make llm          # qwen2.5 7B, 4.7 GB  (8 GB RAM or no GPU: make llm-eco, 1.9 GB)
 ```
 
-If PowerShell blocks the script, run it as `powershell -ExecutionPolicy Bypass -File scripts\swipesort.ps1 setup`.
-
-Every task works the same on both systems: `make <task>` on macOS, `.\scripts\swipesort.ps1 <task>` on Windows. `help` lists them all.
+On Windows, every task is `.\scripts\swipesort.ps1 <task>` instead of `make <task>`. `help` lists them all.
 
 ## 2. Start
 
-```bash
-make run          # → open http://127.0.0.1:8765
-```
+Pick one each time. All three start the same app at `http://127.0.0.1:8765`; they differ in who can connect and what runs in the background:
+
+| Command | Who can connect | Use it for |
+|---|---|---|
+| `make run` | Only this computer | Sorting at your desk. This is the default and the safest. |
+| `make lan` | This computer, plus phones you pair on the same Wi-Fi | Sorting from your phone (§4) |
+| `make watch` | Only this computer, plus the folder watchers | Auto-sorting new downloads (§5) |
+
+Open http://127.0.0.1:8765 in a browser. Ctrl+C in the terminal stops the app.
 
 1. Pick an **input folder** (the mess) and an **output folder** (where things should go). They may be the same folder: sort in place.
 2. Cards appear within seconds. The first run downloads the embedding model (~130 MB) once.
@@ -64,9 +74,7 @@ Each card is one file (or one group of files). Fling it toward a labelled edge: 
 
 ## 4. Use your phone
 
-```bash
-make lan          # instead of `make run`
-```
+Start with `make lan` instead of `make run`, then:
 
 1. On the computer, click **Pair phone** and scan the QR code. The phone must be on the same Wi-Fi.
 2. The phone joins the running session. You can install it to the home screen (Share → Add to Home Screen).
