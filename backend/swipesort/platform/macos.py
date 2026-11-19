@@ -131,7 +131,7 @@ class MacOSPlatform(FallbackPlatform):
         fcntl: Any = importlib.import_module("fcntl")
 
         try:
-            fd = os.open(path, os.O_RDONLY | os.O_NONBLOCK)
+            fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))  # POSIX-only flag
         except PermissionError:
             return True
         except OSError:
