@@ -547,14 +547,14 @@ class SessionService:
             right = Edge(label=f"Send all {n} to {dest}", action="confirm_all")
         edges: dict[str, Edge] = {
             "right": right,
-            "up": Edge(label="Review one by one", action="review"),
+            "up": Edge(label="Show each file separately", action="review"),
             "left": Edge(label="Reject all", action="reject_all"),
             "down": Edge(label=f"Trash all {n}", action="trash_all"),
         }
         if kind != "move" and self.settings.proposals.enabled:
             # SPEC §6.1: "send them to Work/_Inbox/?" -> Up suggests a new folder anyway
             edges["up"] = Edge(label="Suggest a new folder", action="suggest_folder")
-            edges["left"] = Edge(label="Review one by one", action="review")
+            edges["left"] = Edge(label="Show each file separately", action="review")
         return Card(
             id=f"b{kind[0]}{target_id}", kind="batch", file=infos[0], reason=reason,
             edges=edges, confidence=min_conf, destination=dest,

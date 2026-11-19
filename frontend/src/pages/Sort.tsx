@@ -121,44 +121,52 @@ export function Sort({ sessionId, onNew, local = true }: { sessionId: number; on
     output: { label: 'Output tree', title: 'Output', body: <OutputTree sessionId={sessionId} /> },
   } as const
 
+  const undoButton = (
+    <button
+      type="button"
+      disabled={undoCount === 0}
+      onClick={() => void undo()}
+      title="Undo (Z / Ctrl+Z / Cmd+Z)"
+      className="min-h-11 shrink-0 rounded-lg border border-stone-300 px-3 text-sm hover:bg-stone-200 disabled:opacity-30 md:min-h-0 md:py-1 dark:border-stone-700 dark:hover:bg-stone-800"
+    >
+      <span aria-hidden className="mr-1">↶</span>Undo{undoCount ? ` (${undoCount})` : ''}
+    </button>
+  )
+
   return (
     <div className="flex h-full flex-col overflow-hidden">
-      <header className="flex items-center gap-2 border-b border-stone-200 px-2 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] md:gap-3 md:px-3 md:py-2 dark:border-stone-800">
-        {mobile && (
-          <button type="button" onClick={() => setDrawer('input')} className={btn}>
-            Input
-          </button>
-        )}
-        <div className="min-w-0 flex-1 py-2 md:py-0">
-          <div className="h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800">
-            <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
-          </div>
-          <p className="mt-1 truncate text-xs text-stone-500">
-            {progress.decided} done · {progress.remaining} left · <span data-testid="ready-ahead" title="Cards precomputed and ready">
-              {queue.length} ready{mobile ? '' : ' ahead'}
-            </span>
-            {progress.processed < progress.scanned && (
-              <span data-testid="analyzing" className="ml-1 text-amber-600 dark:text-amber-400">
-                {' '}· analyzing {progress.processed}/{progress.scanned}
+      <header className="border-b border-stone-200 px-2 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] md:px-3 md:py-2 dark:border-stone-800">
+        <div className={`flex items-center gap-2 md:gap-3 ${mobile ? 'flex-wrap' : ''}`}>
+          {mobile && (
+            <div className="flex w-full items-center gap-1 pt-1">
+              <button type="button" onClick={() => setDrawer('input')} className={btn}>
+                Input
+              </button>
+              <button type="button" onClick={() => setDrawer('output')} className={btn}>
+                Output
+              </button>
+              <div className="flex-1" />
+              {undoButton}
+            </div>
+          )}
+          <div className="min-w-0 flex-1 pb-2 md:py-0">
+            <div className="h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800">
+              <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
+            </div>
+            <p className="mt-1 truncate text-xs text-stone-500">
+              {progress.decided} done · {progress.remaining} left · <span data-testid="ready-ahead" title="Cards precomputed and ready">
+                {queue.length} ready{mobile ? '' : ' ahead'}
               </span>
-            )}
-          </p>
+              {progress.processed < progress.scanned && (
+                <span data-testid="analyzing" className="ml-1 text-amber-600 dark:text-amber-400">
+                  {' '}· analyzing {progress.processed}/{progress.scanned}
+                </span>
+              )}
+            </p>
+          </div>
+          {!mobile && local && <PairButton className={btn} />}
+          {!mobile && undoButton}
         </div>
-        {!mobile && local && <PairButton className={btn} />}
-        <button
-          type="button"
-          disabled={undoCount === 0}
-          onClick={() => void undo()}
-          title="Undo (Z / Ctrl+Z / Cmd+Z)"
-          className="min-h-11 rounded-lg border border-stone-300 px-3 text-sm hover:bg-stone-200 disabled:opacity-30 md:min-h-0 md:py-1 dark:border-stone-700 dark:hover:bg-stone-800"
-        >
-          Undo{undoCount ? ` (${undoCount})` : ''}
-        </button>
-        {mobile && (
-          <button type="button" onClick={() => setDrawer('output')} className={btn}>
-            Output
-          </button>
-        )}
       </header>
 
       <div className="flex min-h-0 flex-1">

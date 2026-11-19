@@ -27,7 +27,9 @@ describe('BottomSheet', () => {
     )
     const dialog = screen.getByRole('dialog', { name: 'Output tree' })
     expect(dialog).toHaveAttribute('data-sheet', 'true')
-    expect(screen.getByTestId('sheet-handle')).toHaveTextContent('Output')
+    expect(screen.getByTestId('sheet-handle')).toBeInTheDocument()
+    expect(dialog).toHaveTextContent('Output')
+    expect(screen.getByTestId('sheet-close')).toBeInTheDocument()
     expect(screen.getByText('body')).toBeInTheDocument()
   })
 

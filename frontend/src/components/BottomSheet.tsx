@@ -85,13 +85,25 @@ export function BottomSheet({
           <div
             data-testid="sheet-handle"
             onPointerDown={(e) => controls.start(e)}
-            className="flex min-h-11 shrink-0 cursor-grab touch-none flex-col items-center justify-center gap-1 px-4 pt-2"
+            className="flex min-h-7 shrink-0 cursor-grab touch-none items-center justify-center px-4 pt-2"
           >
             <span aria-hidden className="h-1.5 w-10 rounded-full bg-stone-300 dark:bg-stone-700" />
-            {title && <div className="w-full text-center text-sm font-semibold">{title}</div>}
           </div>
         )}
-        {!sheet && title && <div className="px-4 pt-3 text-sm font-semibold">{title}</div>}
+        {title && (
+          <div className={`flex shrink-0 items-center gap-3 px-4 ${sheet ? 'pb-2' : 'pt-3 pb-1'}`}>
+            <div className="min-w-0 flex-1 truncate text-base font-semibold leading-none">{title}</div>
+            <button
+              type="button"
+              aria-label="Close"
+              data-testid="sheet-close"
+              onClick={onClose}
+              className="flex h-11 w-11 shrink-0 items-center justify-center rounded-full text-xl leading-none text-stone-500 hover:bg-stone-100 md:h-8 md:w-8 dark:hover:bg-stone-800"
+            >
+              ×
+            </button>
+          </div>
+        )}
         {children}
       </motion.div>
     </div>
