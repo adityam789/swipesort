@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { api } from '../api/client'
 import type { BrowseOut, SessionOut } from '../api/types'
+import { PairButton } from '../components/PairDialog'
+import { SessionPicker } from '../components/SessionPicker'
 
 function BrowseDialog({ initial, onSelect, onClose }: { initial: string; onSelect: (p: string) => void; onClose: () => void }) {
   const [data, setData] = useState<BrowseOut | null>(null)
@@ -126,10 +128,14 @@ export function Setup({ onStart }: { onStart: (s: SessionOut) => void }) {
 
   return (
     <main className="mx-auto flex min-h-full max-w-xl flex-col justify-center gap-6 px-5 py-10">
-      <div>
-        <h1 className="text-3xl font-semibold tracking-tight">SwipeSort</h1>
-        <p className="mt-1 text-stone-500 dark:text-stone-400">Fling each file to where it belongs.</p>
+      <div className="flex items-start gap-3">
+        <div className="flex-1">
+          <h1 className="text-3xl font-semibold tracking-tight">SwipeSort</h1>
+          <p className="mt-1 text-stone-500 dark:text-stone-400">Fling each file to where it belongs.</p>
+        </div>
+        <PairButton className="min-h-11 rounded-lg border border-stone-300 px-3 text-sm hover:bg-stone-100 dark:border-stone-700 dark:hover:bg-stone-800" />
       </div>
+      <SessionPicker onPick={onStart} title="Running sessions" />
       <PathField label="Folder to sort (input)" value={input} onChange={setInput} />
       <PathField label="Where sorted files go (output)" value={output} onChange={setOutput} />
       <p className="text-xs text-stone-400">The two may be the same folder to sort in place. Nothing is ever deleted; Trash is undoable.</p>

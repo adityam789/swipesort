@@ -10,8 +10,8 @@ import { TaxonomyCard } from './TaxonomyCard'
 const POSITION: Record<Direction, string> = {
   up: 'top-0 left-1/2 -translate-x-1/2',
   down: 'bottom-0 left-1/2 -translate-x-1/2',
-  left: 'left-0 top-1/2 -translate-y-1/2 max-w-[5.5rem] md:max-w-[8rem]',
-  right: 'right-0 top-1/2 -translate-y-1/2 max-w-[5.5rem] md:max-w-[8rem]',
+  left: 'left-0 top-1/2 -translate-y-1/2 max-w-[4.5rem] md:max-w-[8rem]',
+  right: 'right-0 top-1/2 -translate-y-1/2 max-w-[4.5rem] md:max-w-[8rem]',
 }
 const ARROW: Record<Direction, string> = { up: '↑', down: '↓', left: '←', right: '→' }
 const ORDER: Direction[] = ['up', 'right', 'down', 'left']
@@ -36,16 +36,22 @@ export interface CardViewProps {
   onEdgeClick?: (dir: Direction) => void
   /** True when the card just flipped to its alternate layout (plays a quick flip animation). */
   flipped?: boolean
+  /** Phone layout: the card fills the screen, edge hints sit on the screen edges. */
+  fullscreen?: boolean
 }
 
 /** Renders any card: edge labels come from `card.edges` (data-driven); the body is chosen by `card.kind`. */
-export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick, flipped = false }: CardViewProps) {
+export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick, flipped = false, fullscreen = false }: CardViewProps) {
   const hotkey = (edge: Edge) =>
     Object.entries(card.keys ?? {}).find(
       ([, k]) => k.action === edge.action && k.label === edge.label && (k.target_folder_id ?? null) === (edge.target_folder_id ?? null),
     )?.[0]
   return (
-    <div className="relative mx-auto h-full w-full max-w-xl px-14 py-12 md:px-36" style={{ perspective: 1000 }}>
+    <div
+      data-fullscreen={fullscreen || undefined}
+      className={`relative mx-auto h-full w-full ${fullscreen ? 'px-9 py-12' : 'max-w-xl px-14 py-12 md:px-36'}`}
+      style={{ perspective: 1000 }}
+    >
       {ORDER.map((dir) => {
         const edge = card.edges[dir]
         if (!edge) return null
@@ -59,7 +65,7 @@ export function CardView({ card, aimed = null, bind, x, y, rotate, onEdgeClick, 
             data-aimed={active || undefined}
             data-highlight={highlighted || undefined}
             onClick={() => onEdgeClick?.(dir)}
-            className={`absolute z-10 rounded-full border bg-white/80 px-3 py-1.5 text-center text-xs font-medium leading-tight shadow-sm backdrop-blur transition dark:bg-stone-900/80 ${tone(edge)} ${POSITION[dir]} ${
+            className={`absolute z-10 ${fullscreen ? 'min-h-11 min-w-11 px-2 text-[11px]' : 'px-3'} rounded-full border bg-white/80 py-1.5 text-center text-xs font-medium leading-tight shadow-sm backdrop-blur transition dark:bg-stone-900/80 ${tone(edge)} ${POSITION[dir]} ${
               active ? 'scale-110 ring-2 ring-current' : highlighted ? 'font-semibold opacity-100 ring-2 ring-emerald-500' : 'opacity-80 hover:opacity-100'
             }`}
           >

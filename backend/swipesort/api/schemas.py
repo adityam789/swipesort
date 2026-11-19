@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
 from pydantic import BaseModel
@@ -42,6 +43,8 @@ class SessionOut(BaseModel):
     output_root: str
     status: str
     progress: Progress
+    live: bool = True  # pipeline running in this daemon (False: left over from an earlier run)
+    created_at: datetime | None = None
 
 
 class TreeNode(BaseModel):

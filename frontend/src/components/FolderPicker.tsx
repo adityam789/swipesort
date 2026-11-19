@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react'
 import type { FolderOut } from '../api/types'
 import { filterFolders } from '../lib/fuzzy'
+import { useIsMobile } from '../gestures/useIsMobile'
+import { BottomSheet } from './BottomSheet'
 
 export interface FolderPickerProps {
   folders: FolderOut[]
@@ -21,6 +23,8 @@ export function FolderPicker({ folders, onPick, onClose, onCreate, initialId }: 
   const [error, setError] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
   const listRef = useRef<HTMLUListElement>(null)
+  // Phones: don't pop the keyboard over the list on open (tap the search field to type).
+  const mobile = useIsMobile()
 
   const results = useMemo(() => {
     const list = filterFolders(folders, query)
@@ -77,18 +81,9 @@ export function FolderPicker({ folders, onPick, onClose, onCreate, initialId }: 
   }
 
   return (
-    <div
-      className="fixed inset-0 z-50 flex items-end justify-center bg-black/40 p-0 md:items-center md:p-6"
-      onMouseDown={(e) => e.target === e.currentTarget && onClose()}
-    >
-      <div
-        role="dialog"
-        aria-label="Choose folder"
-        onKeyDown={onKeyDown}
-        className="flex max-h-[80vh] w-full max-w-lg flex-col overflow-hidden rounded-t-2xl bg-white shadow-xl md:rounded-2xl dark:bg-stone-900"
-      >
+    <BottomSheet label="Choose folder" onClose={onClose} onKeyDown={onKeyDown} closeOnEscape={false} className="md:max-h-[80vh]">
         <input
-          autoFocus
+          autoFocus={!mobile}
           value={query}
           onChange={(e) => {
             setQuery(e.target.value)
@@ -107,7 +102,7 @@ export function FolderPicker({ folders, onPick, onClose, onCreate, initialId }: 
               aria-selected={f === selected}
               onMouseMove={() => setActive(i)}
               onClick={() => onPick(f)}
-              className={`flex cursor-pointer items-baseline justify-between gap-3 px-4 py-2 text-sm ${
+              className={`flex min-h-11 cursor-pointer items-center justify-between gap-3 px-4 py-2 text-sm md:min-h-0 ${
                 f === selected ? 'bg-emerald-50 dark:bg-emerald-950' : ''
               }`}
             >
@@ -138,14 +133,13 @@ export function FolderPicker({ folders, onPick, onClose, onCreate, initialId }: 
               <button
                 type="button"
                 onClick={() => setCreating(true)}
-                className="rounded-lg px-3 py-1.5 text-sm font-medium text-emerald-700 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
+                className="min-h-11 rounded-lg px-3 py-1.5 text-sm font-medium text-emerald-700 md:min-h-0 hover:bg-emerald-50 dark:text-emerald-300 dark:hover:bg-emerald-950"
               >
                 + New folder
               </button>
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </BottomSheet>
   )
 }

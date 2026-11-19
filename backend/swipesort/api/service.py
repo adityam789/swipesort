@@ -128,6 +128,7 @@ class SessionService:
         return SessionOut(
             id=row.id, input_root=row.input_root, output_root=row.output_root,
             status=row.status, progress=self._progress(db, row.id),
+            live=row.id in self.pipelines, created_at=row.created_at,
         )
 
     def _add_folder(self, db: DB, sid: int, path: Path, root: Path, created_by: str) -> Folder:
@@ -190,6 +191,11 @@ class SessionService:
         self.pipelines[sid] = pipe
         pipe.start()
         return out_model
+
+    def list_sessions(self) -> list[SessionOut]:
+        with DB(self.engine) as db:
+            rows = db.exec(select(SessionRow).order_by(SessionRow.id.desc())).all()  # type: ignore[union-attr]
+            return [self._session_out(db, r) for r in rows]
 
     def get_session(self, sid: int) -> SessionOut:
         with DB(self.engine) as db:

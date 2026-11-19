@@ -198,8 +198,30 @@ class Executor(BaseModel):
 
 
 class Server(BaseModel):
-    host: str = "127.0.0.1"
+    host: str = "127.0.0.1"  # localhost-only mode (default): no firewall prompt, no phone
     port: int = 8765
+    # LAN mode (`swipesort serve --lan`, SPEC §10): bind lan_host so a paired phone can connect.
+    # The first bind to 0.0.0.0 makes Windows Firewall ask for permission.
+    lan: bool = False
+    lan_host: str = "0.0.0.0"
+    print_qr: bool = True  # print a pairing QR in the terminal when the LAN daemon starts
+    # Host headers accepted on trusted loopback requests (DNS-rebinding guard; any port).
+    # "testserver" is what Starlette's TestClient sends.
+    local_hostnames: list[str] = Field(
+        default_factory=lambda: ["localhost", "127.0.0.1", "[::1]", "::1", "testserver"])
+    # pairing (SPEC §12 POST /api/pair)
+    pair_code_ttl_s: int = 300
+    pair_code_length: int = 8
+    pair_max_failures: int = 5  # failed redeems per client IP within the window -> 429
+    pair_global_max_failures: int = 20  # all clients; exceeding it voids every pending code
+    pair_failure_window_s: int = 300
+    token_ttl_days: int = 180  # device tokens; 0 = never expire (still revocable)
+    token_cookie: str = "swipesort_token"
+    last_seen_every_s: int = 60  # throttle for device.last_seen writes
+    # previews served to phones: large images are downscaled (cached) before sending
+    preview_max_px: int = 1600
+    preview_downscale_bytes: int = 1_500_000
+    preview_jpeg_quality: int = 82
 
 
 class Settings(BaseModel):
@@ -225,10 +247,16 @@ def app_dir() -> Path:
 
 def load_settings(path: Path | None = None) -> Settings:
     path = path or app_dir() / "config.toml"
+    s = Settings()
     if path.is_file():
         with path.open("rb") as f:
-            return Settings.model_validate(tomllib.load(f))
-    return Settings()
+            s = Settings.model_validate(tomllib.load(f))
+    # `swipesort serve --lan/--port` pass these down (also to uvicorn's reload subprocess).
+    if os.environ.get("SWIPESORT_LAN") is not None:
+        s.server.lan = os.environ["SWIPESORT_LAN"] == "1"
+    if os.environ.get("SWIPESORT_PORT"):
+        s.server.port = int(os.environ["SWIPESORT_PORT"])
+    return s
 
 
 _settings: Settings | None = None

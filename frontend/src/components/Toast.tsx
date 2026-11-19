@@ -16,7 +16,7 @@ export function ToastHost() {
   return (
     <div
       role="status"
-      className={`fixed bottom-4 left-1/2 z-40 flex max-w-[92vw] -translate-x-1/2 items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-lg ${
+      className={`fixed bottom-[calc(3.75rem+env(safe-area-inset-bottom))] left-1/2 md:bottom-4 z-40 flex max-w-[92vw] -translate-x-1/2 items-center gap-3 rounded-xl px-4 py-2.5 text-sm shadow-lg ${
         toast.kind === 'error'
           ? 'bg-red-600 text-white'
           : 'bg-stone-900 text-stone-50 dark:bg-stone-100 dark:text-stone-900'
@@ -30,7 +30,7 @@ export function ToastHost() {
             dismiss()
             void undo()
           }}
-          className="shrink-0 font-semibold underline underline-offset-2"
+          className="min-h-11 shrink-0 font-semibold underline underline-offset-2 md:min-h-0"
         >
           Undo
         </button>

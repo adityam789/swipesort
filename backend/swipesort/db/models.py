@@ -190,3 +190,16 @@ class Proposal(SQLModel, table=True):
     named_by: str = "fallback"  # fallback | llm | user
     singleton: bool = False  # §6.1 "clearly a new topic" single file (lower priority)
     created_at: datetime = Field(default_factory=now)
+
+
+class Device(SQLModel, table=True):
+    """A phone paired over LAN (SPEC §9, §12 POST /api/pair). Only a SHA-256 of the bearer
+    token is stored; deleting the row revokes the device."""
+
+    id: int | None = Field(default=None, primary_key=True)
+    token_hash: str = Field(index=True, unique=True)
+    name: str = ""
+    user_agent: str = ""
+    created_at: datetime = Field(default_factory=now)
+    last_seen: datetime = Field(default_factory=now)
+    expires_at: datetime | None = None

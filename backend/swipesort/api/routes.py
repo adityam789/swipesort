@@ -3,9 +3,19 @@ from __future__ import annotations
 import mimetypes
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
+from fastapi import (
+    APIRouter,
+    Depends,
+    HTTPException,
+    Query,
+    Request,
+    WebSocket,
+    WebSocketDisconnect,
+)
 from fastapi.responses import FileResponse, PlainTextResponse, Response
+from PIL import Image, ImageOps
 
+from swipesort.api.pairing import require_local
 from swipesort.api.schemas import (
     BrowseEntry,
     BrowseOut,
@@ -43,7 +53,14 @@ def _guard(exc: Exception) -> HTTPException:
     raise exc
 
 
-@router.post("/sessions", response_model=SessionOut)
+@router.get("/sessions", response_model=list[SessionOut])
+def list_sessions(request: Request) -> list[SessionOut]:
+    """Newest first; `live` sessions belong to this daemon run (a phone resumes one)."""
+    return svc(request).list_sessions()
+
+
+# Creating a session names arbitrary filesystem roots: desktop (loopback) only.
+@router.post("/sessions", response_model=SessionOut, dependencies=[Depends(require_local)])
 def create_session(body: SessionCreate, request: Request) -> SessionOut:
     try:
         return svc(request).create_session(body.input_root, body.output_root)
@@ -141,6 +158,9 @@ def _preview(path: Path, cache_key: str, request: Request) -> Response:
         raise HTTPException(404, "missing")
     ext = path.suffix.lower().lstrip(".")
     if path.is_file() and ext in IMAGE_EXT:
+        small = _downscaled(path, request.app.state.thumb_dir / cache_key, s)
+        if small is not None:
+            return FileResponse(small, media_type="image/jpeg")
         return FileResponse(path, media_type=mimetypes.guess_type(path.name)[0])
     if path.is_file() and ext in TEXT_EXT:
         with path.open("r", encoding="utf-8", errors="replace") as f:
@@ -154,7 +174,29 @@ def _preview(path: Path, cache_key: str, request: Request) -> Response:
     return Response(status_code=204)
 
 
-@router.get("/fs/browse", response_model=BrowseOut)
+def _downscaled(path: Path, cache: Path, s: SessionService) -> Path | None:
+    """Large photos are shrunk (cached JPEG) so previews load fast on a phone over Wi-Fi."""
+    cfg = s.settings.server
+    try:
+        st = path.stat()
+        if st.st_size < cfg.preview_downscale_bytes or path.suffix.lower() == ".gif":
+            return None
+        out = cache / f"preview-{cfg.preview_max_px}-{st.st_mtime_ns}-{st.st_size}.jpg"
+        if out.is_file():
+            return out
+        with Image.open(path) as im:
+            img = ImageOps.exif_transpose(im)
+            img.thumbnail((cfg.preview_max_px, cfg.preview_max_px))
+            cache.mkdir(parents=True, exist_ok=True)
+            tmp = out.with_suffix(".tmp")
+            img.convert("RGB").save(tmp, "JPEG", quality=cfg.preview_jpeg_quality)
+            tmp.replace(out)  # app cache dir, not a user file
+        return out
+    except (OSError, ValueError, Image.DecompressionBombError):
+        return None
+
+
+@router.get("/fs/browse", response_model=BrowseOut, dependencies=[Depends(require_local)])
 def browse(path: str = Query("")) -> BrowseOut:
     p = Path(path).expanduser() if path else Path.home()
     if not p.is_absolute() or not p.is_dir():

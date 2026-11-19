@@ -1,6 +1,10 @@
 import type {
   BrowseOut,
   Card,
+  DeviceOut,
+  PairOut,
+  PairStart,
+  PairStatus,
   DecideIn,
   DecideOut,
   FolderCreate,
@@ -20,8 +24,12 @@ export class ApiError extends Error {
   }
 }
 
+/** Fired when a paired phone's token stops working (revoked/expired): the app shows pairing. */
+export const UNAUTHORIZED_EVENT = 'swipesort:unauthorized'
+
 async function request<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, init)
+  if (res.status === 401 && typeof window !== 'undefined') window.dispatchEvent(new Event(UNAUTHORIZED_EVENT))
   if (!res.ok) {
     let detail = res.statusText
     try {
@@ -32,6 +40,7 @@ async function request<T>(url: string, init?: RequestInit): Promise<T> {
     }
     throw new ApiError(res.status, detail || `HTTP ${res.status}`)
   }
+  if (res.status === 204) return undefined as T
   return (await res.json()) as T
 }
 
@@ -45,6 +54,12 @@ function post<T>(url: string, body: unknown): Promise<T> {
 
 export const api = {
   createSession: (body: SessionCreate) => post<SessionOut>('/api/sessions', body),
+  listSessions: () => request<SessionOut[]>('/api/sessions'),
+  pairStatus: () => request<PairStatus>('/api/pair/status'),
+  pairStart: () => post<PairStart>('/api/pair/start', {}),
+  pair: (code: string, name: string) => post<PairOut>('/api/pair', { code, name }),
+  devices: () => request<DeviceOut[]>('/api/devices'),
+  revokeDevice: (id: number) => request<void>(`/api/devices/${id}`, { method: 'DELETE' }),
   getSession: (id: number) => request<SessionOut>(`/api/sessions/${id}`),
   getTree: (id: number, side: 'input' | 'output') =>
     request<TreeNode>(`/api/sessions/${id}/tree?side=${side}`),
@@ -60,6 +75,8 @@ export const api = {
   browse: (path?: string) =>
     request<BrowseOut>(`/api/fs/browse?path=${encodeURIComponent(path ?? '')}`),
 }
+
+export const pairQrUrl = (code: string) => `/api/pair/qr.svg?code=${encodeURIComponent(code)}`
 
 export const previewUrl = (fileId: number) => `/api/files/${fileId}/preview`
 

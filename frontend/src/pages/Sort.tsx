@@ -5,9 +5,12 @@ import type { Direction, Edge, FolderOut } from '../api/types'
 import { CardView } from '../cards/CardView'
 import { DuplicatePanel } from '../cards/DuplicatePanel'
 import { Preview } from '../cards/Preview'
+import { BottomSheet } from '../components/BottomSheet'
 import { FolderPicker } from '../components/FolderPicker'
+import { PairButton } from '../components/PairDialog'
 import { ToastHost } from '../components/Toast'
 import { useFling } from '../gestures/useFling'
+import { useIsMobile } from '../gestures/useIsMobile'
 import { useSession } from '../store/session'
 import { InputTree } from '../trees/InputTree'
 import { OutputTree } from '../trees/OutputTree'
@@ -17,8 +20,9 @@ type Drawer = 'input' | 'output' | null
 
 const DEFER_EDGE: Edge = { label: 'Later', action: 'defer' }
 
-export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => void }) {
+export function Sort({ sessionId, onNew, local = true }: { sessionId: number; onNew: () => void; local?: boolean }) {
   const qc = useQueryClient()
+  const mobile = useIsMobile()
   const queue = useSession((s) => s.queue)
   const exhausted = useSession((s) => s.exhausted)
   const fetching = useSession((s) => s.fetching)
@@ -87,6 +91,7 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
       decide(card, edge ?? DEFER_EDGE)
     },
     onPreview: togglePreview,
+    onTap: mobile ? togglePreview : undefined, // no Space key on a phone: tap the card
     onPicker: openPicker,
   })
 
@@ -109,25 +114,28 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
   const total = progress.decided + progress.remaining
   const pct = total > 0 ? Math.round((progress.decided / total) * 100) : 0
 
-  const asideBase = 'flex-col border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950'
-  const aside = (side: Exclude<Drawer, null>) =>
-    drawer === side
-      ? `fixed inset-x-0 bottom-0 z-30 flex h-[60vh] rounded-t-2xl border-t shadow-2xl md:static md:z-auto md:h-auto md:w-72 md:rounded-none md:border-t-0 md:shadow-none ${asideBase} ${side === 'input' ? 'md:border-r' : 'md:border-l'}`
-      : `hidden md:flex md:w-72 ${asideBase} ${side === 'input' ? 'md:border-r' : 'md:border-l'}`
+  const asideBase = 'flex w-72 flex-col border-stone-200 bg-stone-50 dark:border-stone-800 dark:bg-stone-950'
+  const btn = 'min-h-11 rounded-lg px-3 text-sm hover:bg-stone-200 md:min-h-0 md:py-1 dark:hover:bg-stone-800'
+  const trees = {
+    input: { label: 'Input tree', title: 'Input', body: <InputTree sessionId={sessionId} /> },
+    output: { label: 'Output tree', title: 'Output', body: <OutputTree sessionId={sessionId} /> },
+  } as const
 
   return (
-    <div className="flex h-full flex-col">
-      <header className="flex items-center gap-3 border-b border-stone-200 px-3 py-2 dark:border-stone-800">
-        <button type="button" onClick={() => setDrawer(drawer === 'input' ? null : 'input')} className="rounded-lg px-2 py-1 text-sm hover:bg-stone-200 md:hidden dark:hover:bg-stone-800">
-          Input
-        </button>
-        <div className="min-w-0 flex-1">
+    <div className="flex h-full flex-col overflow-hidden">
+      <header className="flex items-center gap-2 border-b border-stone-200 px-2 pt-[env(safe-area-inset-top)] pr-[max(0.5rem,env(safe-area-inset-right))] pl-[max(0.5rem,env(safe-area-inset-left))] md:gap-3 md:px-3 md:py-2 dark:border-stone-800">
+        {mobile && (
+          <button type="button" onClick={() => setDrawer('input')} className={btn}>
+            Input
+          </button>
+        )}
+        <div className="min-w-0 flex-1 py-2 md:py-0">
           <div className="h-1.5 overflow-hidden rounded-full bg-stone-200 dark:bg-stone-800">
             <div className="h-full bg-emerald-500 transition-all" style={{ width: `${pct}%` }} />
           </div>
-          <p className="mt-1 text-xs text-stone-500">
+          <p className="mt-1 truncate text-xs text-stone-500">
             {progress.decided} done · {progress.remaining} left · <span data-testid="ready-ahead" title="Cards precomputed and ready">
-              {queue.length} ready ahead
+              {queue.length} ready{mobile ? '' : ' ahead'}
             </span>
             {progress.processed < progress.scanned && (
               <span data-testid="analyzing" className="ml-1 text-amber-600 dark:text-amber-400">
@@ -136,29 +144,37 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
             )}
           </p>
         </div>
+        {!mobile && local && <PairButton className={btn} />}
         <button
           type="button"
           disabled={undoCount === 0}
           onClick={() => void undo()}
           title="Undo (Z / Ctrl+Z / Cmd+Z)"
-          className="rounded-lg border border-stone-300 px-3 py-1 text-sm hover:bg-stone-200 disabled:opacity-30 dark:border-stone-700 dark:hover:bg-stone-800"
+          className="min-h-11 rounded-lg border border-stone-300 px-3 text-sm hover:bg-stone-200 disabled:opacity-30 md:min-h-0 md:py-1 dark:border-stone-700 dark:hover:bg-stone-800"
         >
           Undo{undoCount ? ` (${undoCount})` : ''}
         </button>
-        <button type="button" onClick={() => setDrawer(drawer === 'output' ? null : 'output')} className="rounded-lg px-2 py-1 text-sm hover:bg-stone-200 md:hidden dark:hover:bg-stone-800">
-          Output
-        </button>
+        {mobile && (
+          <button type="button" onClick={() => setDrawer('output')} className={btn}>
+            Output
+          </button>
+        )}
       </header>
 
       <div className="flex min-h-0 flex-1">
-        <aside className={aside('input')} aria-label="Input tree">
-          <h2 className="px-3 pt-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Input</h2>
-          <InputTree sessionId={sessionId} />
-        </aside>
+        {!mobile && (
+          <aside className={`${asideBase} border-r`} aria-label={trees.input.label}>
+            <h2 className="px-3 pt-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Input</h2>
+            {trees.input.body}
+          </aside>
+        )}
 
-        <main className="min-w-0 flex-1 overflow-hidden p-2 md:p-6">
+        <main
+          data-layout={mobile ? 'mobile' : 'desktop'}
+          className={`min-w-0 flex-1 overflow-hidden ${mobile ? 'px-0 pt-1 pb-[env(safe-area-inset-bottom)]' : 'p-6'}`}
+        >
           {card ? (
-            <CardView key={card.id} card={card} aimed={aimed} bind={bind} x={x} y={y} rotate={rotate} onEdgeClick={fling} flipped={flippedIds.has(card.id)} />
+            <CardView key={card.id} card={card} aimed={aimed} bind={bind} x={x} y={y} rotate={rotate} onEdgeClick={fling} flipped={flippedIds.has(card.id)} fullscreen={mobile} />
           ) : (
             <div data-testid="waiting" className="flex h-full items-center justify-center text-stone-400">
               {analyzing ? `Analyzing files… ${progress.processed}/${progress.scanned}` : 'Waiting for cards…'}
@@ -166,11 +182,19 @@ export function Sort({ sessionId, onNew }: { sessionId: number; onNew: () => voi
           )}
         </main>
 
-        <aside className={aside('output')} aria-label="Output tree">
-          <h2 className="px-3 pt-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Output</h2>
-          <OutputTree sessionId={sessionId} />
-        </aside>
+        {!mobile && (
+          <aside className={`${asideBase} border-l`} aria-label={trees.output.label}>
+            <h2 className="px-3 pt-3 text-xs font-semibold uppercase tracking-wide text-stone-400">Output</h2>
+            {trees.output.body}
+          </aside>
+        )}
       </div>
+
+      {mobile && drawer && (
+        <BottomSheet label={trees[drawer].label} title={trees[drawer].title} onClose={() => setDrawer(null)} className="h-[70dvh]">
+          <div className="flex min-h-0 flex-1 flex-col">{trees[drawer].body}</div>
+        </BottomSheet>
+      )}
 
       {previewOpen && card && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/70 p-4 md:p-10" onClick={togglePreview}>

@@ -42,6 +42,43 @@ export interface SessionOut {
   output_root: string
   status: string
   progress: Progress
+  /** Pipeline running in this daemon run (false: left over from an earlier run). */
+  live?: boolean
+  created_at?: string | null
+}
+
+// Phone pairing (SPEC §12 POST /api/pair; backend api/pairing.py)
+export interface PairStatus {
+  /** Request came from the computer running the daemon (desktop). */
+  local: boolean
+  paired: boolean
+  /** Daemon listens on the LAN (`swipesort serve --lan`). */
+  lan: boolean
+  device_id: number | null
+}
+
+export interface PairStart {
+  code: string
+  url: string
+  lan: boolean
+  lan_ip: string
+  expires_at: string
+  expires_in: number
+}
+
+export interface PairOut {
+  device_id: number
+  token: string
+  expires_at: string | null
+}
+
+export interface DeviceOut {
+  id: number
+  name: string
+  user_agent: string
+  created_at: string
+  last_seen: string
+  expires_at: string | null
 }
 
 export interface TreeNode {
