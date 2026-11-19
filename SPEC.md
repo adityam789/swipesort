@@ -367,8 +367,8 @@ swipesort/
 | **M5 New folders** | Proposals from clustering, cold-start taxonomy | Empty output + 300 mixed files → proposed structure the eval rates sensible; seeded hidden categories rediscovered |
 | **M6 Mobile** | PWA, QR pairing, touch swipe physics, bottom sheets | Full session completed from a phone over LAN |
 | **M7 Watch mode** | See §18. Background agent (launchd / Task Scheduler), file-event watcher on chosen folders, settle delay, auto-move for Confirm-tier files above the auto threshold, notification + "pending" queue for the rest | Drop 20 files into a watched Downloads folder: high-confidence ones are auto-sorted within 10 s of finishing download; the rest appear as cards; every auto-move is undoable |
-| **M8 Learning** | Isotonic calibration, decision-driven weights, filename/source rules ("always X → Y", "from paypal.com → Work/PayPal") | After 200 decisions, Confirm-tier accept rate ≥ 95% |
-| Later | Dry-run plan export, Linux, Tauri/native app, cloud model toggle | — |
+
+M8 and everything after it moved to [§19 Future enhancements](#19-future-enhancements) at the v1.0 release.
 
 **Cross-platform rule:** every milestone's acceptance check runs on macOS **and** Windows (CI matrix plus one manual run on a real Windows machine for M0, M6 and M7).
 
@@ -413,3 +413,19 @@ swipesort/
   - **Everything else** → added to a pending queue. The menu-bar or app badge shows a count, and the user clears it later with the normal swipe UI.
 - **Exact duplicates of a file already in the output tree** go to quarantine automatically when auto-trash is on. It's off by default, and when off they become pending cards.
 - **Safety:** auto-move is off until the user has made ≥ 50 decisions, so the calibration has data. The app shows a weekly digest of what was auto-sorted.
+
+---
+
+## 19. Future enhancements
+
+These were scoped out of v1.0 (M0–M7). Each keeps the acceptance bar it had as a milestone.
+
+| Item | Scope | Acceptance |
+|---|---|---|
+| **M8 Learning** | Isotonic calibration, decision-driven weights, filename/source rules ("always X → Y", "from paypal.com → Work/PayPal") | After 200 decisions, Confirm-tier accept rate ≥ 95% |
+| Proposal quality | Course-level grouping (lectures split by course today), fewer camera-based photo splits, better fallback names | Cold-start rediscovery 8/8 with the local model |
+| LLM latency | Benchmark the 3B "eco" model; rerank only near the cursor on slow hardware | Rerank keeps pace at 1 card/s |
+| Watch mode | Re-process files that change after they were sorted; let the LLM veto an auto-move | — |
+| Dry-run | Compute everything, execute nothing, export the plan as CSV | — |
+| Platforms | Linux; Tauri/native app; HTTPS on LAN so the phone PWA can work offline | — |
+| Cloud models | Opt-in cloud model toggle (`allow_cloud`) | — |

@@ -1,6 +1,6 @@
 @startuml lld-new-folder
 !include _style.iuml
-title New folder → re-rank (immediate) and re-cluster (triggered) (LLD)
+title New folder → re-rank and re-cluster (LLD)
 
 actor User
 participant SessionService as Svc
@@ -37,8 +37,10 @@ group rescore_stale — every READY file whose suggestion has an old tree/index 
 end
 RR -> DB : picks cards with cleared llm_json\n(wakes every ≤ 2 s)
 
-group Re-clustering — NOT on folder creation (gap)
-  Svc -> P : note_decisions(n, inboxed)
-  P -> PR : every 25 decisions or 8 new inbox files\n→ propose(): pool inbox-tier + _Inbox files,\nHDBSCAN per stop node, new proposals
+group Re-clustering
+  RS -> PR : folder was created → request_proposals()\nright after the rescore
+  Svc -> P : also: note_decisions(n, inboxed)\nevery 25 decisions or 8 new inbox files
+  PR -> PR : propose(): pool inbox-tier READY files + _Inbox files,\nHDBSCAN per descent stop node,\nskip dismissed groups → new proposals
+  PR -> Bus : "proposals" [ids]
 end
 @enduml

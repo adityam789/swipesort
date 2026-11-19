@@ -1,6 +1,6 @@
 @startuml lld-m8-learning
 !include _style.iuml
-title M8 — learning loop (PLANNED, not built yet)
+title M8 — learning loop (future enhancement, not built)
 
 start
 :every Decision stores the shown suggestion,\nits confidence, tier and the user's action;

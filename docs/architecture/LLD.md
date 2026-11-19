@@ -68,12 +68,11 @@ Every number below is a default from `config.py`; none is hard-coded.
 5. Changed cards get `card_updated`. Cards whose top 3 changed lose their LLM result, and the rerank thread redoes them.
 6. `_withdraw_resolved()` withdraws any pending proposal whose members are now mostly confident (≥ 50% outside the Inbox tier). Those members come back as normal cards.
 
-**Re-clustering does not happen on folder creation.** The proposer re-runs only:
-- every 25 decisions (`every_decisions`), or
-- when 8 files have been sent to an `_Inbox` (`inbox_trigger`).
+**Re-clustering runs right after that rescore.** A folder creation sets a flag, and the rescore that follows calls `request_proposals()`. Files that still don't fit anywhere are re-clustered immediately. The proposer also re-runs:
+- every 25 decisions (`every_decisions`), and
+- after 8 files have been sent to an `_Inbox` (`inbox_trigger`).
 
-It then pools inbox-tier READY files plus files already sitting in `_Inbox` folders, and clusters them with HDBSCAN per descent stop node. Groups that were dismissed earlier are never proposed again.
-**Gap:** a file that still doesn't fit after the rescore waits for the next trigger. The fix is to call `request_proposals()` after the post-creation rescore.
+Each run pools inbox-tier READY files plus files already sitting in `_Inbox` folders, then clusters them with HDBSCAN per descent stop node. Groups that were dismissed earlier are never proposed again. Undoing a folder withdraws any pending proposal created under it.
 
 ## 4. Cold start
 
@@ -129,7 +128,7 @@ It then pools inbox-tier READY files plus files already sitting in `_Inbox` fold
 - **The pairing code is proof of presence.** Only a loopback client can mint one; it's single-use and lasts 5 minutes.
 - **The device token is the credential.** It's 256 bits, only its hash is stored, it can be revoked, and it travels as an HttpOnly cookie.
 
-## 9. M8 learning (planned)
+## 9. M8 learning (future enhancement)
 
 ![m8](diagrams/lld-m8-learning.svg)
 

@@ -51,7 +51,7 @@ After a file is READY, two background consumers refine it:
 | main | session start; `add_files` (watch mode) | Phase A: CPU pass. Phase B: lookahead-ordered embed + score. Then the first proposer pass. |
 | rescore | `request_rescore()` | `rescore_stale()`: re-scores every suggestion computed at an older tree or index version. Vector math only. |
 | rerank | `rerank_wanted`, or every ≤ 2 s | LLM rerank of the next READY card near the cursor that has no LLM result yet. |
-| propose | `request_proposals()`, LLM naming | Re-clusters low-confidence files; renames proposals with the LLM. |
+| propose | `request_proposals()`: after a folder is created, every 25 decisions, or after 8 inbox arrivals | Re-clusters low-confidence files; renames proposals with the LLM. |
 
 Threads talk through events and the DB. Changes reach the UI through `EventBus` → WebSocket.
 
@@ -67,4 +67,4 @@ Threads talk through events and the DB. Changes reach the UI through `EventBus` 
 | M5 | Proposals, cold start | [LLD §3](LLD.md#3-new-folder--re-rank-and-re-cluster), [LLD §4](LLD.md#4-cold-start) |
 | M6 | PWA, pairing | [LLD §8](LLD.md#8-pairing--lan-auth) |
 | M7 | Watch mode | [LLD §7](LLD.md#7-watch-mode) |
-| M8 | Learning (planned) | [LLD §9](LLD.md#9-m8-learning-planned) |
+| M8+ | Future enhancements | [SPEC §19](../../SPEC.md#19-future-enhancements), [LLD §9](LLD.md#9-m8-learning-future-enhancement) |
